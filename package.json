@@ -1,0 +1,28 @@
+{
+  "name": "macrofactor-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "db:init": "wrangler d1 execute macrofactor --file=./schema.sql --remote",
+    "db:init:local": "wrangler d1 execute macrofactor --file=./schema.sql --local",
+    "ingest": "node scripts/ingest.mjs",
+    "cf-typegen": "wrangler types",
+    "type-check": "tsc --noEmit",
+    "doc-drift": "node scripts/doc-drift.mjs"
+  },
+  "dependencies": {
+    "agents": "^0.17.1",
+    "xlsx": "^0.18.5",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250310.0",
+    "typescript": "^5.6.0",
+    "wrangler": "^4.105.0"
+  }
+}

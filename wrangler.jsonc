@@ -1,0 +1,43 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "macrofactor-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-03-10",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // The MCP server runs inside this Durable Object (provided by the `agents` package).
+  "migrations": [
+    { "new_sqlite_classes": ["MyMCP"], "tag": "v1" },
+    { "new_sqlite_classes": ["ImportDO"], "tag": "v2" }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "MyMCP", "name": "MCP_OBJECT" },
+      { "class_name": "ImportDO", "name": "IMPORT_DO" }
+    ]
+  },
+
+  // Your nutrition data lives here. Create it with:  npx wrangler d1 create macrofactor
+  // then paste the returned database_id below.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "macrofactor",
+      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+    }
+  ],
+
+  // Secrets (set via `npx wrangler secret put NAME`, do NOT put them here):
+  //   INGEST_SECRET              - shared secret for /today, /upload-export, /pending*, /ingest
+  //   MCP_TOKEN                  - (optional) makes the MCP URL capability-style /mcp/<token>
+  //   PUSHCUT_WEBHOOK_URL        - (optional) Pushcut webhook for food log notifications
+  //   PUSHCUT_WATER_WEBHOOK_URL  - (optional) Pushcut webhook for water log notifications
+  //   PUSHCUT_WEIGHT_WEBHOOK_URL - (optional) Pushcut webhook for weight log notifications
+  //   PUSHCUT_BATCH_WEBHOOK_URL  - (optional) Pushcut webhook for batch food logging
+  //   PUSHCUT_PR_WEBHOOK_URL     - (optional) Pushcut webhook for "new PR" alerts
+
+  // Daily 08:00 UTC fallback for the PR-achievement check (primary trigger is /upload-export).
+  "triggers": { "crons": ["0 8 * * *"] },
+
+  "observability": { "enabled": true }
+}

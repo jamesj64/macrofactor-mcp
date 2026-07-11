@@ -1,0 +1,12 @@
+node_modules/
+.wrangler/
+.dev.vars
+ingest.config.json
+connector-url.txt
+*.xlsx
+worker-configuration.d.ts
+.DS_Store
+.claude/
+.superpowers/
+.gstack/
+*.csv

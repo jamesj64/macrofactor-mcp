@@ -1,0 +1,4 @@
+{
+  "workerUrl": "https://macrofactor-mcp.<your-subdomain>.workers.dev",
+  "ingestSecret": "the-same-value-you-set-with-wrangler-secret-put-INGEST_SECRET"
+}
