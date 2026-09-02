@@ -1654,6 +1654,12 @@ async function handleSyncAck(request: Request, env: Env): Promise<Response> {
     }
     if (raw.trim()) payload = JSON.parse(raw);
     if (typeof payload === "string") payload = JSON.parse(payload); // double-encoded by Shortcuts
+    // JSON-mode Shortcuts bodies wrap the summary in a single key, e.g. {"summary": {consumed, remaining}}.
+    if (payload && typeof payload === "object" && !payload.consumed) {
+      const vals = Object.values(payload);
+      const inner = vals.length === 1 ? vals[0] : payload.summary;
+      if (inner && typeof inner === "object" && (inner as any).consumed) payload = inner;
+    }
   } catch {
     payload = null;
   }

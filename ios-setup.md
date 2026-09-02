@@ -52,8 +52,10 @@ crashes, the items are re-served after 10 minutes.
     - Method **POST**
     - Headers: add `claim` = the **Dictionary Value** from step 4 (tap the value field → Select Variable).
       (Inserting it into the URL as `&claim=…` works too; the header is just easier to wire.)
-    - Request Body: **File** → the **Log by JSON** result from step 6 (the last one wins). If you skip the
-      body the ack still clears the queue; you just won't get live today totals.
+    - Request Body: tap **JSON** on the Request Body row and switch it to **File**, then set the file to the
+      **Log by JSON** result from step 6 (the last one wins). Staying in JSON mode also works: add one
+      **Dictionary** field with key `summary` = the Log by JSON result. If you skip the body the ack still
+      clears the queue; you just won't get live today totals.
 15. *(Optional)* **Show Notification** ← the step-14 result — you'll see `{"ok":true,"acked":{...},"today":{...}}`.
 
 > **Gotchas:** never rename Shortcut variables and never set a variable's Type to **URL** (coercing a
