@@ -1654,6 +1654,11 @@ async function handleSyncAck(request: Request, env: Env): Promise<Response> {
     }
     if (raw.trim()) payload = JSON.parse(raw);
     if (typeof payload === "string") payload = JSON.parse(payload); // double-encoded by Shortcuts
+    // "Repeat Results" from the Shortcut is a list of every iteration's summary — keep the last one.
+    if (Array.isArray(payload)) {
+      const withConsumed = payload.filter((x) => x && typeof x === "object" && (x as any).consumed);
+      payload = withConsumed.length ? withConsumed[withConsumed.length - 1] : null;
+    }
     // JSON-mode Shortcuts bodies wrap the summary in a single key, e.g. {"summary": {consumed, remaining}}.
     if (payload && typeof payload === "object" && !payload.consumed) {
       const vals = Object.values(payload);
