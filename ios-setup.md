@@ -170,9 +170,12 @@ upserts every food into the saved-foods library as source `recent` (macros of th
 **On demand:** because MF Sync ends with *Run Shortcut → MF Nightly*, the agent's `refresh_from_phone`
 tool (or any tap of the MacroFactor notification) refreshes all of this whenever it's needed.
 
-**Still export-only:** MacroFactor's expenditure (TDEE) and trend weight, Favorites/Custom foods you
-saved but haven't eaten recently, body measurements, workouts and training aggregates. An occasional
-export covers those.
+Targets come along too: every summary carries "remaining to goal", so the server derives the day's
+calorie/macro targets and keeps the targets table current without an export.
+
+**Still export-only:** MacroFactor's expenditure (TDEE) and its trend weight (raw weight and body
+measurements are in Apple Health), plus workouts/training aggregates if you use MacroFactor Workouts.
+Nothing else needs Update MF.
 
 ## Optional — "MF Today" (refresh today without logging)
 

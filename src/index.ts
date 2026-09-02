@@ -175,13 +175,12 @@ Logging playbook ("add a jersey mike's giant turkey sub, no toppings"):
 Never fabricate precision: if a chain publishes ranges or you estimated, say so in notes and in your reply.
 Use get_today for "what's left today", weekly_review for check-ins, cancel_pending_log for "never mind".
 
-Data freshness: history comes from the user's last export PLUS a phone feed (MF Nightly) that re-posts today's totals,
-targets and the foods eaten in the last 24 h whenever the user syncs, and every night. If today looks stale, call
-refresh_from_phone and re-query after the user taps the notification. search_my_foods / log_saved_food cover foods the
-user has actually eaten (source 'recent') as well as Favorites/Custom foods from the export. The user also
-syncs MacroFactor to Apple Health, so if this server's history is empty or stale and your client offers an Apple
-Health tool/connector, daily calories, protein, carbs, fat and body weight are usually available there. Prefer this
-server for today's live totals, targets/remaining, saved foods, and all logging; use Apple Health only to fill gaps.`;
+Data freshness: history comes from a phone feed (MF Nightly) that posts today's totals, micros, targets and the foods
+eaten in the last 24 h whenever the user syncs and every night, plus an OPTIONAL MacroFactor export. Only two things
+need an export: MacroFactor's expenditure (TDEE) and its trend weight. If today looks stale, call refresh_from_phone
+and re-query after the user taps the notification. search_my_foods / log_saved_food cover foods the user has actually
+eaten (source 'recent'). The user syncs MacroFactor to Apple Health, so if your client has an Apple Health tool, raw
+body weight and body measurements live there. Prefer this server for totals, targets, foods and all logging.`;
 
 // Recompute all-time PRs from workout_sets, write any new ones to pr_alerts, and fire the
 // "New PR" Pushcut push. Runs in a background context (ctx.waitUntil after /upload-export and
@@ -330,9 +329,8 @@ export class MyMCP extends McpAgent<Env> {
       {
         title: "Data freshness",
         description:
-          "How much data is loaded and its most recent date. Use to check if data is stale. If the export data is " +
-          "empty or old, note that the user syncs MacroFactor to Apple Health — an Apple Health tool in your client " +
-          "(if any) can supply daily calories/macros and body weight for the gap.",
+          "How much data is loaded and its most recent date. Use to check if data is stale before analytics. " +
+          "Totals/targets/foods refresh from the phone (refresh_from_phone); only expenditure and trend weight need an export.",
         inputSchema: {},
         annotations: READ_ONLY,
       },
@@ -340,9 +338,10 @@ export class MyMCP extends McpAgent<Env> {
         text({
           ...(await db.dataStatus(DB())),
           alternative_sources:
-            "Daily calories/protein/carbs/fat and body weight are also synced by MacroFactor into Apple Health; if this " +
-            "export data is stale or missing and an Apple Health tool is available in your client, use it for those " +
-            "series. This server remains the source for today's live totals, targets, saved foods and logging.",
+            "Stale? Call refresh_from_phone (re-posts today's totals, targets and recent foods once the user taps). " +
+            "Raw body weight and body measurements are in Apple Health (the user syncs MacroFactor there) — use an " +
+            "Apple Health tool in your client if one exists. Only expenditure (TDEE) and trend weight need a " +
+            "MacroFactor export; if those are missing, say so rather than estimating them.",
         }),
     );
 
@@ -1638,7 +1637,7 @@ async function handleToday(request: Request, env: Env): Promise<Response> {
 
   const ex = db.extractTodaySummary(payload);
   await db.upsertToday(env.DB, date, ex, raw, Date.now(), url.searchParams.get("source") || "today-summary-shortcut");
-  const snapshot = await db.recordDaySnapshot(env.DB, date, ex.consumed);
+  const snapshot = await db.recordDaySnapshot(env.DB, date, ex.consumed, ex.remaining);
   return json({
     ok: true,
     date,
@@ -1780,7 +1779,7 @@ async function handleSyncAck(request: Request, env: Env): Promise<Response> {
     const date = validIsoDate(url.searchParams.get("date")) || db.todayLocal();
     const ex = db.extractTodaySummary(payload);
     await db.upsertToday(env.DB, date, ex, raw, Date.now(), "mf-sync");
-    const snapshot = await db.recordDaySnapshot(env.DB, date, ex.consumed);
+    const snapshot = await db.recordDaySnapshot(env.DB, date, ex.consumed, ex.remaining);
     today = { date, consumed: { calories: ex.calories, protein: ex.protein, carbs: ex.carbs, fat: ex.fat }, had_remaining: !!ex.remaining, snapshot };
   }
   return json({

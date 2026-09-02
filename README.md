@@ -182,17 +182,18 @@ npm test                         # schema tests against MacroFactor's official s
 
 ## Apple Health
 
-MacroFactor syncs daily calories, macros and body weight to Apple Health. The server tells agents (in its MCP
-instructions and in `data_status`) that an Apple Health tool in the client, when available, can fill those
-series for days not covered by an export. This server stays the source for today's live totals, targets,
-saved foods and all logging.
+MacroFactor syncs daily calories, macros, body weight and measurements to Apple Health. The server tells
+agents (in its MCP instructions and in `data_status`) that an Apple Health tool in the client, when
+available, is the place for raw weight and body measurements. This server stays the source for totals,
+targets, foods and all logging.
 
 ## Known limits
 
 - Entries land at **sync time** — MacroFactor's actions have no date field. Pass `intended_time`
   to any food-write tool and the server matches it against the Food Log CSV on the next import.
-- History is as fresh as your last export, or your nightly Shortcut (totals, micros, foods); **today** is
-  live after every sync. Expenditure/TDEE, trend weight, saved foods and workouts remain export-only.
+- With the MF Nightly Shortcut, totals, micros, targets, the food log and the saved-foods library all come
+  from the phone; **today** is live after every sync. Only MacroFactor's expenditure (TDEE) and trend weight
+  (and workouts) still need an export — the export is optional otherwise.
 - USDA and Open Food Facts don't have chain-restaurant menus; the agent uses web search for those and
   logs explicit numbers (it is told to say so in `notes`).
 - Weights are stored in kg (MacroFactor exports normalise to kg even if the app shows pounds).

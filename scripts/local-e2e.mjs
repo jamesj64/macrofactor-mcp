@@ -88,7 +88,7 @@ check("second claim is empty (rows are claimed)", again.count === 0);
 const pend2 = await call("get_pending_logs", {});
 check("pending shows claimed:true", pend2.food?.every((f) => f.claimed === true));
 
-const summary = { consumed: { energy: 1282, protein: 93, carbs: 190, fat: 30, water: 500 }, remaining: { energy: { target: 918 }, protein: { target: 87 }, water: { minimum: 1500, target: 2000, maximum: 3500 } } };
+const summary = { consumed: { energy: 1282, protein: 93, carbs: 190, fat: 30, water: 500 }, remaining: { energy: { target: 918 }, protein: { target: 87 }, carbs: { target: 60 }, fat: { target: 40 }, water: { minimum: 1500, target: 2000, maximum: 3500 } } };
 const ack = await fetch(`${base}/sync-ack?token=${SECRET}&claim=${claimRes.claim}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(summary) }).then((r) => r.json());
 check("/sync-ack deletes claimed rows", ack.ok && ack.acked?.foods === 4 && ack.acked?.water === 1 && ack.acked?.weight === 1, JSON.stringify(ack.acked));
 check("/sync-ack stored today summary", ack.today?.consumed?.calories === 1282, JSON.stringify(ack.today));
@@ -96,6 +96,9 @@ const pend3 = await call("get_pending_logs", {});
 check("queue empty after ack", pend3.total_pending === 0 && pend3.recent_dispatches?.some((d) => d.landed === true && /Jersey/.test(d.name)));
 const today = await call("get_today", { detail: "full" });
 check("get_today is live with target from remaining", today.live === true && today.consumed?.calories === 1282 && today.remaining_to_target?.calories === 918, JSON.stringify({ c: today.consumed, r: today.remaining_to_target }));
+
+const tg = await call("get_targets", {});
+check("targets derived from the sync-ack summary", tg.target?.calories === 2200 && tg.target?.protein === 180, JSON.stringify(tg.target));
 
 // unauthorised
 const un = await fetch(`${base}/pending-all?token=nope`);
