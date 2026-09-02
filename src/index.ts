@@ -1602,26 +1602,16 @@ async function handleToday(request: Request, env: Env): Promise<Response> {
     payload = { consumed: qConsumed, ...(Object.keys(qRemaining).length ? { remaining: qRemaining } : {}) };
     raw = JSON.stringify(payload);
   } else {
-    // Tolerant body parse — Shortcuts may send JSON, a JSON string, or a multipart file.
-    try {
-      const ctype = request.headers.get("content-type") || "";
-      if (ctype.includes("multipart/form-data")) {
-        const form = await request.formData();
-        for (const v of form.values()) {
-          raw = typeof v === "string" ? v : await (v as File).text();
-          break;
-        }
-      } else {
-        raw = await request.text();
-      }
-      payload = JSON.parse(raw);
-    } catch {
+    const body = await readSummaryBody(request);
+    raw = body.raw;
+    payload = body.payload;
+    if (!payload) {
       // Echo what we actually received so a misconfigured shortcut is easy to diagnose from the phone.
       return json(
         {
           error:
-            "no macro query params and the body wasn't valid JSON — pass ?energy=&protein=&carbs=&fat= " +
-            "or POST MacroFactor's Today-Summary JSON {consumed, remaining}",
+            "no nutrient query params and the body wasn't a Today Summary — POST MacroFactor's " +
+            "{consumed, remaining} JSON (e.g. the Macros Remaining result) or pass ?energy=&protein=&carbs=&fat=",
           content_type: request.headers.get("content-type") || null,
           received_length: (raw || "").length,
           received_start: (raw || "").slice(0, 200),
@@ -1629,7 +1619,6 @@ async function handleToday(request: Request, env: Env): Promise<Response> {
         400,
       );
     }
-    if (!payload || typeof payload !== "object") return json({ error: "expected a JSON object" }, 400);
   }
 
   const date =
@@ -1696,6 +1685,42 @@ async function handleFoodsSeen(request: Request, env: Env): Promise<Response> {
   });
 }
 
+// Read a Today Summary from a Shortcut's request body, tolerating everything Shortcuts produces:
+// raw JSON, a JSON string (double-encoded), multipart file, a list of summaries (Repeat Results →
+// last one wins), or a single-key wrapper like {"summary": {...}}. Returns payload null when no
+// usable {consumed, ...} object is present.
+async function readSummaryBody(request: Request): Promise<{ raw: string; payload: any | null }> {
+  let raw = "";
+  let payload: any = null;
+  try {
+    const ctype = request.headers.get("content-type") || "";
+    if (ctype.includes("multipart/form-data")) {
+      const form = await request.formData();
+      for (const v of form.values()) {
+        raw = typeof v === "string" ? v : await (v as File).text();
+        break;
+      }
+    } else {
+      raw = await request.text();
+    }
+    if (raw.trim()) payload = JSON.parse(raw);
+    if (typeof payload === "string") payload = JSON.parse(payload);
+    if (Array.isArray(payload)) {
+      const withConsumed = payload.filter((x) => x && typeof x === "object" && (x as any).consumed);
+      payload = withConsumed.length ? withConsumed[withConsumed.length - 1] : null;
+    }
+    if (payload && typeof payload === "object" && !payload.consumed) {
+      const vals = Object.values(payload);
+      const inner = vals.length === 1 ? vals[0] : payload.summary;
+      if (inner && typeof inner === "object" && (inner as any).consumed) payload = inner;
+    }
+  } catch {
+    payload = null;
+  }
+  if (!payload || typeof payload !== "object" || !payload.consumed || typeof payload.consumed !== "object") payload = null;
+  return { raw, payload };
+}
+
 // GET /pending-all?token=<INGEST_SECRET>
 // The "MF Sync" Shortcut's single fetch. Claims every queued food / water / weight row and returns
 //   { claim, count, foods: [MacroFactorFood...], water: [mL...], weight: [kg...] }
@@ -1743,39 +1768,10 @@ async function handleSyncAck(request: Request, env: Env): Promise<Response> {
   const claim = claimRaw != null ? parseInt(claimRaw, 10) : NaN;
   const acked = Number.isFinite(claim) && claim > 0 ? await db.ackClaim(env.DB, claim, Date.now()) : null;
 
-  // Tolerant body parse — Shortcuts may send JSON, a JSON string, a multipart file, or nothing.
-  let raw = "";
-  let payload: any = null;
-  try {
-    const ctype = request.headers.get("content-type") || "";
-    if (ctype.includes("multipart/form-data")) {
-      const form = await request.formData();
-      for (const v of form.values()) {
-        raw = typeof v === "string" ? v : await (v as File).text();
-        break;
-      }
-    } else {
-      raw = await request.text();
-    }
-    if (raw.trim()) payload = JSON.parse(raw);
-    if (typeof payload === "string") payload = JSON.parse(payload); // double-encoded by Shortcuts
-    // "Repeat Results" from the Shortcut is a list of every iteration's summary — keep the last one.
-    if (Array.isArray(payload)) {
-      const withConsumed = payload.filter((x) => x && typeof x === "object" && (x as any).consumed);
-      payload = withConsumed.length ? withConsumed[withConsumed.length - 1] : null;
-    }
-    // JSON-mode Shortcuts bodies wrap the summary in a single key, e.g. {"summary": {consumed, remaining}}.
-    if (payload && typeof payload === "object" && !payload.consumed) {
-      const vals = Object.values(payload);
-      const inner = vals.length === 1 ? vals[0] : payload.summary;
-      if (inner && typeof inner === "object" && (inner as any).consumed) payload = inner;
-    }
-  } catch {
-    payload = null;
-  }
+  const { raw, payload } = await readSummaryBody(request);
 
   let today: unknown = null;
-  if (payload && typeof payload === "object" && payload.consumed && typeof payload.consumed === "object") {
+  if (payload) {
     const date = validIsoDate(url.searchParams.get("date")) || db.todayLocal();
     const ex = db.extractTodaySummary(payload);
     await db.upsertToday(env.DB, date, ex, raw, Date.now(), "mf-sync");

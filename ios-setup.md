@@ -111,32 +111,26 @@ Repeat for each export you want refreshed. From a computer, `npm run ingest -- f
 Runs itself every night (Automation → Time of Day → **11:50 PM** → Run Immediately → MF Nightly) and
 pushes the day's totals and the day's foods, so the export is only needed occasionally.
 
-MacroFactor exposes two read actions: **Get Nutrition State** (one nutrient per call — Calculation
-*Consumed*, *Remaining to Goal*, *Remaining to Minimum* or *Remaining to Maximum*) and **Find Recent Food**,
+MacroFactor exposes three read actions: **Macros Remaining** (the whole Today Summary as JSON),
+**Get Nutrition State** (one nutrient per call) and **Find Recent Food**,
 whose results carry Name, Brand, Time Last Consumed, Consumption Count, Hours Consumed (24 hr), and every
 nutrient (Energy, Protein (g), … Zinc (mg)).
 
-**Part A — today's totals**
+**Part A — today's totals (one action)**
 
-1. Add one **Get Nutrition State** per nutrient, Calculation **Consumed**: Calories, Protein, Carbs, Fat,
-   then any micros you care about (Fiber, Sugars, Saturated Fat, Sodium, Potassium, Calcium, Iron,
-   Magnesium, Vitamin D, Water, Alcohol, Caffeine…). Leave *from JSON* empty so it reads today's live state.
-2. Optionally add **Get Nutrition State** with Calculation **Remaining to Goal** for Calories / Protein /
-   Carbs / Fat — this captures the day's targets.
-3. **Get Contents of URL** — POST, header `x-ingest-secret` = `<INGEST_SECRET>`, no body. Type the URL and
-   insert each result variable after its `=` (param names are MacroFactor's nutrient keys; `rem_` prefix =
-   Remaining to Goal):
+1. Add MacroFactor's **Macros Remaining** action. Its result is the full Today Summary JSON —
+   `{consumed: {…every nutrient…}, remaining: {…goal deltas…}}`.
+2. **Get Contents of URL** — POST, header `x-ingest-secret` = `<INGEST_SECRET>`, Request Body **File** ←
+   the Macros Remaining result:
 
 ```
-https://macrofactor-mcp.<your-subdomain>.workers.dev/today?energy=[Calories]&protein=[Protein]&carbs=[Carbs]&fat=[Fat]&fiber=[Fiber]&sugars=[Sugars]&saturatedFat=[SatFat]&sodium=[Sodium]&potassium=[Potassium]&calcium=[Calcium]&iron=[Iron]&magnesium=[Magnesium]&vitaminD=[VitD]&water=[Water]&rem_energy=[CalRem]&rem_protein=[ProRem]
+https://macrofactor-mcp.<your-subdomain>.workers.dev/today
 ```
 
-Keys: energy, protein, carbs, fat, fiber, sugars, sugarsAdded, starch, saturatedFat, transFat,
-monounsaturatedFat, polyunsaturatedFat, omega3, omega6, cholesterol, choline, alcohol, caffeine, water,
-sodium, potassium, calcium, iron, magnesium, manganese, phosphorus, zinc, copper, selenium, folate,
-vitaminA, vitaminB1, vitaminB2, vitaminB3, vitaminB5, vitaminB6, vitaminB12, vitaminC, vitaminD, vitaminE,
-vitaminK (plus the amino acids). The server writes the `days` and `micronutrients` rows for that date
-(tagged live; a later export replaces them).
+The server stores the summary (today's live totals), fills the `days` and `micronutrients` rows for that
+date, and derives the day's calorie/macro targets from "remaining to goal" (tagged live; a later export
+replaces them). `/today` also accepts individual numbers as query params (`?energy=…&protein=…`,
+`rem_energy=…` for remaining-to-goal) if you ever prefer **Get Nutrition State**.
 
 **Part B — today's foods**
 
