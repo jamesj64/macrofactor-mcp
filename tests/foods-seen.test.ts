@@ -44,9 +44,8 @@ describe("foods-seen parsing", () => {
     expect(toLocalHHMM("Sep 2, 2026 at 11:50 PM")).toBe("23:50");
   });
   it("derives the calendar date from either form", () => {
-    const { parseFoodsSeen: p } = require("../src/db/today");
-    expect(p("A||Sep 2, 2026 at 11:50 PM||1").rows[0].date).toBe("2026-09-02");
-    expect(p("B||2026-09-03T06:59:00Z||1").rows[0].date).toBe("2026-09-02");
-    expect(p("C||8:15 AM||1").rows[0].date).toBeNull();
+    expect(parseFoodsSeen("A||Sep 2, 2026 at 11:50 PM||1").rows[0].date).toBe("2026-09-02");
+    expect(parseFoodsSeen("B||2026-09-03T06:59:00Z||1").rows[0].date).toBe("2026-09-02");
+    expect(parseFoodsSeen("C||8:15 AM||1").rows[0].date).toBeNull();
   });
 });
