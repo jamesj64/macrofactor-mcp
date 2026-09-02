@@ -194,8 +194,9 @@ export async function searchFoods(DB: D1Database, query: string) {
     name_only: rows.filter((x) => x.calories == null).map((x) => ({ name: x.name, source: x.source })),
     note:
       "loggable rows have stored per-serving macros and can be logged directly with log_saved_food " +
-      "(servings scales the saved serving). name_only rows are history entries without stored macros — " +
-      "log those with log_food and explicit macros.",
+      "(servings scales the saved serving). source 'recent' = a food the user actually ate (from the phone feed), " +
+      "macros as last logged for one portion; favorite/custom/history come from the export. name_only rows have " +
+      "no stored macros — log those with log_food and explicit macros.",
   };
 }
 

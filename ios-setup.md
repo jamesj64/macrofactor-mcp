@@ -57,6 +57,9 @@ crashes, the items are re-served after 10 minutes.
       **Dictionary** field with key `summary` = the Log by JSON result. If you skip the body the ack still
       clears the queue; you just won't get live today totals.
 15. *(Optional)* **Show Notification** ← the step-14 result — you'll see `{"ok":true,"acked":{...},"today":{...}}`.
+16. *(Once MF Nightly exists)* **Run Shortcut** → **MF Nightly**. Every sync then also refreshes today's totals,
+    the foods eaten in the last 24 h and the saved-foods library — and the agent's `refresh_from_phone` tool
+    can trigger it through the same notification.
 
 > **Gotchas:** never rename Shortcut variables and never set a variable's Type to **URL** (coercing a
 > response to URL throws *"couldn't convert from Dictionary to URL"*). Type URLs directly into the
@@ -160,10 +163,16 @@ https://macrofactor-mcp.<your-subdomain>.workers.dev/foods-seen?token=<INGEST_SE
    or `{items:[…]}` is accepted too.
 
 The server turns each food into one `food_log` row per consumption (Consumption Count × Hours Consumed,
-the last one at Time Last Consumed) tagged `shortcut`; an export's Food Log CSV replaces them.
+the last one at Time Last Consumed) tagged `shortcut`; an export's Food Log CSV replaces them. It also
+upserts every food into the saved-foods library as source `recent` (macros of the portion last logged), so
+`search_my_foods` / `log_saved_food` work from what you actually eat — those rows survive export uploads.
 
-**Still export-only:** MacroFactor's expenditure (TDEE) and trend weight, your saved-foods library,
-workouts and training aggregates. A monthly export covers those.
+**On demand:** because MF Sync ends with *Run Shortcut → MF Nightly*, the agent's `refresh_from_phone`
+tool (or any tap of the MacroFactor notification) refreshes all of this whenever it's needed.
+
+**Still export-only:** MacroFactor's expenditure (TDEE) and trend weight, Favorites/Custom foods you
+saved but haven't eaten recently, body measurements, workouts and training aggregates. An occasional
+export covers those.
 
 ## Optional — "MF Today" (refresh today without logging)
 

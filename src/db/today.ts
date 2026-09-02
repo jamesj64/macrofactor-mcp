@@ -293,7 +293,8 @@ function expandFood(f: {
   serving_size?: string | null; serving_qty?: number | null; serving_weight_g?: number | null;
 }): any[] {
   const base = {
-    name: f.brand ? `${f.name} (${f.brand})` : f.name,
+    name: f.name,
+    brand: f.brand ?? null,
     serving_size: f.serving_size ?? null, serving_qty: f.serving_qty ?? null, serving_weight_g: f.serving_weight_g ?? null,
     calories: f.calories, protein: f.protein, carbs: f.carbs, fat: f.fat,
   };
@@ -386,15 +387,31 @@ export function parseFoodsSeen(body: unknown): { rows: any[]; unrecognized: stri
   return { rows, unrecognized: [...unrecognized], shape };
 }
 
-export async function replaceFoodsSeen(DB: D1Database, date: string, rows: any[]): Promise<number> {
+export async function replaceFoodsSeen(DB: D1Database, date: string, rows: any[]): Promise<{ stored: number; library: number }> {
   const stmts: D1PreparedStatement[] = [DB.prepare(`DELETE FROM food_log WHERE date = ? AND source = 'shortcut'`).bind(date)];
   const ins = DB.prepare(
     `INSERT INTO food_log (date, time, name, serving_size, serving_qty, serving_weight_g, calories, protein, carbs, fat, source)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'shortcut')`,
   );
   for (const r of rows) {
-    stmts.push(ins.bind(date, r.time ?? null, r.name, r.serving_size ?? null, r.serving_qty ?? null, r.serving_weight_g ?? null, r.calories ?? null, r.protein ?? null, r.carbs ?? null, r.fat ?? null));
+    const name = r.brand ? `${r.name} (${r.brand})` : r.name;
+    stmts.push(ins.bind(date, r.time ?? null, name, r.serving_size ?? null, r.serving_qty ?? null, r.serving_weight_g ?? null, r.calories ?? null, r.protein ?? null, r.carbs ?? null, r.fat ?? null));
+  }
+
+  // Saved-foods library from what was actually eaten: one 'recent' row per distinct food, macros as
+  // last logged (one portion). Export rows (favorite/custom/history) are left alone and win ties;
+  // the importer preserves 'recent' rows across uploads.
+  const seen = new Map<string, any>();
+  for (const r of rows) if (r.calories != null) seen.set(`${r.name}\u0000${r.brand ?? ""}`, r);
+  const delLib = DB.prepare(`DELETE FROM food_library WHERE source = 'recent' AND name = ? AND IFNULL(brand, '') = ?`);
+  const insLib = DB.prepare(
+    `INSERT INTO food_library (name, brand, source, serving_size, serving_qty, serving_weight_g, calories, protein, fat, carbs)
+     VALUES (?, ?, 'recent', ?, 1, ?, ?, ?, ?, ?)`,
+  );
+  for (const r of seen.values()) {
+    stmts.push(delLib.bind(r.name, r.brand ?? ""));
+    stmts.push(insLib.bind(r.name, r.brand ?? null, r.serving_size ?? "portion (as last logged)", r.serving_weight_g ?? null, r.calories, r.protein ?? null, r.fat ?? null, r.carbs ?? null));
   }
   await DB.batch(stmts);
-  return rows.length;
+  return { stored: rows.length, library: seen.size };
 }

@@ -50,7 +50,7 @@ so this uses only **official** mechanisms:
 The server also ships MCP *instructions* with this playbook, so any client that supports them
 (Claude, ChatGPT, Codex) follows it without extra prompting.
 
-## Tools (43)
+## Tools (44)
 
 **Food search**
 
@@ -73,6 +73,7 @@ The server also ships MCP *instructions* with this playbook, so any client that 
 | `relog_meal` | Re‑log a past day's meal (optional hour window) as one entry |
 | `log_water`, `log_weight` | Via MacroFactor's dedicated actions (mL / kg or lbs) |
 | `get_pending_logs`, `cancel_pending_log` | See what's queued or claimed by the phone; "never mind" |
+| `refresh_from_phone` | Ping the phone to re-post today's totals, recent foods and the saved-foods library (no logging) |
 
 **Reads & analytics** (from the upstream project, unchanged)
 
@@ -167,7 +168,7 @@ npm test                         # schema tests against MacroFactor's official s
 | `POST /sync-ack?token=&claim=` | MF Sync | delete the claimed rows; body = MacroFactor's Today Summary → live today |
 | `POST /upload-export` | Update MF / `npm run ingest` | parse an export into D1 |
 | `POST /today` | MF Nightly / refresh Shortcut | live totals for a date; any MacroFactor nutrient key as a query param; gap-fills `days` + `micronutrients` |
-| `POST /foods-seen` | MF Nightly | the day's foods from MacroFactor's Find Recent Food action → `food_log` (tagged `shortcut`) |
+| `POST /foods-seen` | MF Nightly | the day's foods from MacroFactor's Find Recent Food action → `food_log` (tagged `shortcut`) + saved-foods library (`recent`) |
 | `GET /health` | you | D1 check |
 | `/pending`, `/pending-water`, `/pending-weight`, `/pending-batch`, `/ack-batch`, `/cancel-pending` | legacy Shortcuts | per‑type queues from upstream |
 

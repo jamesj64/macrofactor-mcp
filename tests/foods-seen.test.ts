@@ -14,11 +14,11 @@ describe("foods-seen parsing", () => {
     ].join("\n");
     const { rows, shape } = parseFoodsSeen(body);
     expect(shape).toBe("text-lines");
-    expect(rows.map((r) => [r.name, r.time, r.calories, r.protein])).toEqual([
-      ["Greek yogurt (Chobani)", "08:15", 150, 20],
-      ["Chicken breast", "08:00", 330, 62],
-      ["Chicken breast", "13:05", 330, 62],
-      ["Black coffee", null, 2, null],
+    expect(rows.map((r) => [r.name, r.brand, r.time, r.calories, r.protein])).toEqual([
+      ["Greek yogurt", "Chobani", "08:15", 150, 20],
+      ["Chicken breast", null, "08:00", 330, 62],
+      ["Chicken breast", null, "13:05", 330, 62],
+      ["Black coffee", null, null, 2, null],
     ]);
   });
 

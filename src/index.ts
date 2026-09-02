@@ -175,7 +175,10 @@ Logging playbook ("add a jersey mike's giant turkey sub, no toppings"):
 Never fabricate precision: if a chain publishes ranges or you estimated, say so in notes and in your reply.
 Use get_today for "what's left today", weekly_review for check-ins, cancel_pending_log for "never mind".
 
-Data freshness: history tools read the user's last MacroFactor export (data_status shows its age). The user also
+Data freshness: history comes from the user's last export PLUS a phone feed (MF Nightly) that re-posts today's totals,
+targets and the foods eaten in the last 24 h whenever the user syncs, and every night. If today looks stale, call
+refresh_from_phone and re-query after the user taps the notification. search_my_foods / log_saved_food cover foods the
+user has actually eaten (source 'recent') as well as Favorites/Custom foods from the export. The user also
 syncs MacroFactor to Apple Health, so if this server's history is empty or stale and your client offers an Apple
 Health tool/connector, daily calories, protein, carbs, fat and body weight are usually available there. Prefer this
 server for today's live totals, targets/remaining, saved foods, and all logging; use Apple Health only to fill gaps.`;
@@ -1042,9 +1045,9 @@ export class MyMCP extends McpAgent<Env> {
             .optional()
             .describe("Match the saved name exactly (case-insensitive). Use after disambiguation."),
           source: z
-            .enum(["favorite", "custom", "history"])
+            .enum(["favorite", "custom", "history", "recent"])
             .optional()
-            .describe("Restrict to one source (favorite/custom/history) to break a name tie."),
+            .describe("Restrict to one source (favorite/custom/history from the export, recent = foods seen by the nightly feed) to break a name tie."),
           llm_prompt: foodItemShape.llm_prompt,
           intended_time: intendedTimeField,
         },
@@ -1320,6 +1323,34 @@ export class MyMCP extends McpAgent<Env> {
         await db.enqueueWeight(this.env.DB, weightKg, Date.now());
         const r = await notifyPhone(this.env);
         return text({ status: r.status, message: foodMsg(`${weightKg} kg${unit === "lbs" ? ` (${kg} lb)` : ""}`, r) });
+      },
+    );
+
+    this.server.registerTool(
+      "refresh_from_phone",
+      {
+        title: "Ask the phone to refresh data",
+        description:
+          "Pings the user's iPhone (same notification as logging). Tapping it — or saying 'Hey Siri, MF Sync' — runs " +
+          "MF Sync, which drains any queued logs and then runs MF Nightly: today's totals/targets and the foods eaten " +
+          "in the last 24 h are re-posted, and the saved-foods library ('recent' rows) is refreshed. Call this when " +
+          "data_status / get_today looks stale and you need current numbers; then re-query after the user confirms. " +
+          "Does not log anything.",
+        inputSchema: {},
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+      },
+      async () => {
+        const r = await notifyPhone(this.env);
+        if (r.status === "queued_only") {
+          return text({ status: r.status, message: "No phone push is configured (PUSHCUT_WEBHOOK_URL). Ask the user to run the 'MF Sync' Shortcut (or 'Hey Siri, MF Sync') to refresh." });
+        }
+        if (r.status === "push_failed") {
+          return text({ status: r.status, message: `Push failed (${r.detail}). Ask the user to run 'MF Sync' manually.` });
+        }
+        return text({
+          status: "sent",
+          message: "Pinged the phone. Once the user taps the MacroFactor notification (or runs MF Sync via Siri), today's totals and recent foods are refreshed — check data_status.today_live / get_today afterwards.",
+        });
       },
     );
 
@@ -1654,11 +1685,12 @@ async function handleFoodsSeen(request: Request, env: Env): Promise<Response> {
   if (url.searchParams.get("dry_run") === "1") {
     return json({ ok: true, date, dry_run: true, shape: parsed.shape, rows: parsed.rows, unrecognized_keys: parsed.unrecognized, received_start: raw.slice(0, 300) });
   }
-  const stored = await db.replaceFoodsSeen(env.DB, date, parsed.rows);
+  const { stored, library } = await db.replaceFoodsSeen(env.DB, date, parsed.rows);
   return json({
     ok: true,
     date,
     stored,
+    library_upserted: library,
     shape: parsed.shape,
     ...(parsed.unrecognized.length ? { unrecognized_keys: parsed.unrecognized } : {}),
     sample: parsed.rows.slice(0, 3),

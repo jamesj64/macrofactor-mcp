@@ -24,10 +24,16 @@ function json(obj: unknown, status = 200): Response {
 // chunk of inserts go in a single D1 batch (batches are transactional), so a mid-insert
 // failure can never leave the table empty — at worst it keeps the old rows or a partial set,
 // never zero. Pass an empty `rows` to clear a table that is legitimately empty in this export.
+// Rows that did NOT come from an export survive an upload: the saved-foods library rows built from
+// the nightly Find Recent Food feed (source = 'recent'). Everything else is replaced wholesale.
+const KEEP_ON_REPLACE: Record<string, string> = {
+  food_library: `WHERE IFNULL(source, '') <> 'recent'`,
+};
+
 async function replace(DB: D1Database, table: string, rows: Record<string, unknown>[]) {
   const cols = TABLES[table];
   if (!cols) return;
-  const del = DB.prepare(`DELETE FROM ${table}`);
+  const del = DB.prepare(`DELETE FROM ${table} ${KEEP_ON_REPLACE[table] ?? ""}`);
   if (rows.length === 0) {
     await del.run();
     return;
