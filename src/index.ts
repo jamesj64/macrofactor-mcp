@@ -12,6 +12,7 @@ import {
   getFoodDetail, getOFFProduct, headline, nutrientsFor, resolveAmount, searchOFF, searchUSDA,
   type FoodDetail, type FoodHit,
 } from "./foodsearch";
+import { OUT } from "./output-schemas";
 import { handleIngest } from "./ingest";
 import { ImportDO } from "./importer";
 
@@ -35,14 +36,20 @@ export interface Env {
 const READ_ONLY = { readOnlyHint: true } as const;
 const WRITE_HINT = { readOnlyHint: false, destructiveHint: true } as const;
 
+// Every tool declares an outputSchema, so each result carries `structuredContent` (an object) plus the
+// same JSON as text for older clients. Arrays are wrapped as {items, count}; plain strings become
+// {message}. Nulls are stripped (the schemas mark everything optional).
+const stripNulls = (_k: string, v: unknown) => (v === null ? undefined : v);
 function text(obj: unknown) {
+  const structured: Record<string, unknown> = Array.isArray(obj)
+    ? { items: obj, count: obj.length }
+    : typeof obj === "string"
+      ? { message: obj }
+      : ((obj ?? {}) as Record<string, unknown>);
+  const clean = JSON.parse(JSON.stringify(structured, stripNulls)) as Record<string, unknown>;
   return {
-    content: [
-      {
-        type: "text" as const,
-        text: typeof obj === "string" ? obj : JSON.stringify(obj, (_k, v) => (v === null ? undefined : v)),
-      },
-    ],
+    content: [{ type: "text" as const, text: typeof obj === "string" ? obj : JSON.stringify(clean) }],
+    structuredContent: clean,
   };
 }
 
@@ -241,6 +248,7 @@ export class MyMCP extends McpAgent<Env> {
           "Omit both dates for the last 14 days. Days missing here (no export yet) may be available via an " +
           "Apple Health tool in your client — the user syncs MacroFactor to Apple Health.",
         inputSchema: dateRange,
+        outputSchema: OUT.get_daily_nutrition,
         annotations: READ_ONLY,
       },
       async ({ start_date, end_date }) => text(await db.getDays(DB(), start_date, end_date)),
@@ -266,6 +274,7 @@ export class MyMCP extends McpAgent<Env> {
             "'full' returns every raw export column; default returns the curated 29-nutrient set (25 with reference intakes + 4 extras)",
           ),
         },
+        outputSchema: OUT.get_micronutrients,
         annotations: READ_ONLY,
       },
       async ({ start_date, end_date, nutrients, detail }) =>
@@ -282,6 +291,7 @@ export class MyMCP extends McpAgent<Env> {
           "carry suspect:[...] — treat those macros with caution. Dates YYYY-MM-DD; pass start_date/end_date for ANY " +
           "range up to full history. Omit both for the last 7 days.",
         inputSchema: dateRange,
+        outputSchema: OUT.get_food_log,
         annotations: READ_ONLY,
       },
       async ({ start_date, end_date }) => text(await db.getFoodLog(DB(), start_date, end_date)),
@@ -298,6 +308,7 @@ export class MyMCP extends McpAgent<Env> {
           "real body-composition change). Omit both dates for the last 60 days. Body weight is also synced to " +
           "Apple Health by MacroFactor, so an Apple Health tool in your client can fill dates missing here.",
         inputSchema: dateRange,
+        outputSchema: OUT.get_weight_history,
         annotations: READ_ONLY,
       },
       async ({ start_date, end_date }) => text(await db.getWeight(DB(), start_date, end_date)),
@@ -311,6 +322,7 @@ export class MyMCP extends McpAgent<Env> {
           "MacroFactor's calculated daily energy expenditure (TDEE) alongside intake and weight. " +
           "Omit both dates for the last 30 days.",
         inputSchema: dateRange,
+        outputSchema: OUT.get_expenditure,
         annotations: READ_ONLY,
       },
       async ({ start_date, end_date }) => text(await db.getExpenditure(DB(), start_date, end_date)),
@@ -322,6 +334,7 @@ export class MyMCP extends McpAgent<Env> {
         title: "Daily steps",
         description: "Step count per day. Omit both dates for the last 30 days.",
         inputSchema: dateRange,
+        outputSchema: OUT.get_steps,
         annotations: READ_ONLY,
       },
       async ({ start_date, end_date }) => text(await db.getSteps(DB(), start_date, end_date)),
@@ -334,6 +347,7 @@ export class MyMCP extends McpAgent<Env> {
         description:
           "Find foods from your Favorites / Custom Foods / history by name. Returns loggable (stored per-serving macros — feed straight into log_saved_food) separately from name_only history rows (no stored macros).",
         inputSchema: { query: z.string() },
+        outputSchema: OUT.search_my_foods,
         annotations: READ_ONLY,
       },
       async ({ query }) => text(await db.searchFoods(DB(), query)),
@@ -347,6 +361,7 @@ export class MyMCP extends McpAgent<Env> {
           "How much data is loaded and its most recent date. Use to check if data is stale before analytics. " +
           "Totals/targets/foods refresh from the phone (refresh_from_phone); only expenditure and trend weight need an export.",
         inputSchema: {},
+        outputSchema: OUT.data_status,
         annotations: READ_ONLY,
       },
       async () =>
@@ -376,6 +391,7 @@ export class MyMCP extends McpAgent<Env> {
           date: z.string().optional().describe("YYYY-MM-DD; omit for today"),
           detail: z.enum(["full"]).optional().describe("'full' adds consumed_all (every nutrient today) + remaining_raw"),
         },
+        outputSchema: OUT.get_today,
         annotations: READ_ONLY,
       },
       async ({ date, detail }) => text(await db.getToday(DB(), date, detail)),
@@ -391,6 +407,7 @@ export class MyMCP extends McpAgent<Env> {
           "steps, resolved targets and adherence verdict. " +
           "date=YYYY-MM-DD (omit for today).",
         inputSchema: { date: z.string().optional().describe("YYYY-MM-DD; omit for today") },
+        outputSchema: OUT.get_day,
         annotations: READ_ONLY,
       },
       async ({ date }) => {
@@ -415,6 +432,7 @@ export class MyMCP extends McpAgent<Env> {
           date: z.string().optional().describe("YYYY-MM-DD; omit for today"),
           week: z.boolean().optional().describe("true = include all 7 weekday target rows of the governing program"),
         },
+        outputSchema: OUT.get_targets,
         annotations: READ_ONLY,
       },
       async ({ date, week }) => text(await db.getTargets(DB(), date, week)),
@@ -430,6 +448,7 @@ export class MyMCP extends McpAgent<Env> {
           "duration-vs-ETA verdict. In-progress goals run to the latest trend reading. Use for " +
           "bulk/cut/recomp retrospectives and sanity-checking a new goal's rate against history.",
         inputSchema: {},
+        outputSchema: OUT.get_goal_history,
         annotations: READ_ONLY,
       },
       async () => text(await db.getGoalHistory(DB())),
@@ -446,6 +465,7 @@ export class MyMCP extends McpAgent<Env> {
           "includes avg_carb_diff / avg_fat_diff (g/day vs target) — the macro-split gap, not just calories. " +
           "Omit both dates for the last 30 days.",
         inputSchema: dateRange,
+        outputSchema: OUT.get_adherence,
         annotations: READ_ONLY,
       },
       async ({ start_date, end_date }) => text(await db.getAdherence(DB(), start_date, end_date)),
@@ -469,6 +489,7 @@ export class MyMCP extends McpAgent<Env> {
           end_date: z.string().optional().describe("YYYY-MM-DD; omit for today"),
           windows: z.array(z.number()).optional().describe("rolling day-windows; default [7, 14, 28]"),
         },
+        outputSchema: OUT.weekly_summary,
         annotations: READ_ONLY,
       },
       async ({ end_date, windows }) => text(await db.getWeeklySummary(DB(), end_date, windows)),
@@ -488,6 +509,7 @@ export class MyMCP extends McpAgent<Env> {
           end_date: z.string().optional().describe("YYYY-MM-DD; omit for today"),
           windows: z.array(z.number()).optional().describe("rolling day-windows; default [7, 14, 28]"),
         },
+        outputSchema: OUT.weekly_review,
         annotations: READ_ONLY,
       },
       async ({ end_date, windows }) => text(await db.getWeeklyReview(DB(), end_date, windows)),
@@ -504,6 +526,7 @@ export class MyMCP extends McpAgent<Env> {
           "barbell tonnage; tonnage also includes bodyweight contribution. It's a stimulus measure, not " +
           "bar weight — use get_workouts/get_prs for barbell load. Omit both dates for the last 30 days.",
         inputSchema: { ...dateRange, detail: z.enum(["daily"]).optional().describe("'daily' adds the raw per-date-per-muscle rows") },
+        outputSchema: OUT.get_training_volume,
         annotations: READ_ONLY,
       },
       async ({ start_date, end_date, detail }) => text(await db.getTrainingVolume(DB(), start_date, end_date, detail)),
@@ -529,6 +552,7 @@ export class MyMCP extends McpAgent<Env> {
           ...dateRange,
           all: z.boolean().optional().describe("return full history series (default: last 30 points per series)"),
         },
+        outputSchema: OUT.get_exercise_progress,
         annotations: READ_ONLY,
       },
       async ({ exercise, metric, start_date, end_date, all }) =>
@@ -546,6 +570,7 @@ export class MyMCP extends McpAgent<Env> {
           "you log in pounds receive weight_lb/volume_lb/*_lb fields (reconstructed ×2.20462). " +
           "Omit both dates for the last 30 days.",
         inputSchema: dateRange,
+        outputSchema: OUT.get_workouts,
         annotations: READ_ONLY,
       },
       async ({ start_date, end_date }) => text(await db.getWorkouts(DB(), start_date, end_date)),
@@ -562,6 +587,7 @@ export class MyMCP extends McpAgent<Env> {
           "you log in pounds receive e1rm_lb, heaviest_lb, best_set_volume_lb fields (reconstructed " +
           "×2.20462). Filter by exercise (partial name).",
         inputSchema: { exercise: z.string().optional().describe("partial exercise name") },
+        outputSchema: OUT.get_prs,
         annotations: READ_ONLY,
       },
       async ({ exercise }) => text(await db.getPrs(DB(), exercise)),
@@ -576,6 +602,7 @@ export class MyMCP extends McpAgent<Env> {
           "assessment over time, from the Body Metrics sheet. Sparse — only dates you measured appear. " +
           "For scale/trend weight and body-fat %, use get_weight_history. Omit both dates for the last year.",
         inputSchema: dateRange,
+        outputSchema: OUT.get_body_metrics,
         annotations: READ_ONLY,
       },
       async ({ start_date, end_date }) => text(await db.getBodyMetrics(DB(), start_date, end_date)),
@@ -592,6 +619,7 @@ export class MyMCP extends McpAgent<Env> {
           "completed sessions and get_exercise_progress/get_prs for performance. Optional: filter by " +
           "program name.",
         inputSchema: { program: z.string().optional().describe("partial program name, e.g. 'Strong'") },
+        outputSchema: OUT.get_program,
         annotations: READ_ONLY,
       },
       async ({ program }) => text(await db.getProgram(DB(), program)),
@@ -622,6 +650,7 @@ export class MyMCP extends McpAgent<Env> {
               "this exact date (required_daily_deficit_kcal). Omitted for gain goals.",
             ),
         },
+        outputSchema: OUT.forecast_weight,
         annotations: READ_ONLY,
       },
       async ({ target_date }) => text(await db.getForecastWeight(DB(), target_date)),
@@ -640,6 +669,7 @@ export class MyMCP extends McpAgent<Env> {
           "trend-weight span and ≥7 days of logged intake within that span. Uses finalized export data only. " +
           "Omit both dates for the last 28 days.",
         inputSchema: dateRange,
+        outputSchema: OUT.reconcile_energy_balance,
         annotations: READ_ONLY,
       },
       async ({ start_date, end_date }) => text(await db.reconcileEnergyBalance(DB(), start_date, end_date)),
@@ -655,6 +685,7 @@ export class MyMCP extends McpAgent<Env> {
           "and each weekday's share of the cumulative weekly caloric surplus — pinpointing the single " +
           "highest-leverage day to improve. Omit both dates for the last 90 days.",
         inputSchema: dateRange,
+        outputSchema: OUT.day_of_week_patterns,
         annotations: READ_ONLY,
       },
       async ({ start_date, end_date }) => text(await db.getDayOfWeekPatterns(DB(), start_date, end_date)),
@@ -672,6 +703,7 @@ export class MyMCP extends McpAgent<Env> {
           "not necessarily when the food was eaten — retroactively added items may skew late-window totals. " +
           "Items with a matched intended_time hint (from log_food/log_foods_batch) are bucketed at the time they were actually eaten.",
         inputSchema: { ...dateRange },
+        outputSchema: OUT.get_nutrient_timing,
         annotations: READ_ONLY,
       },
       async ({ start_date, end_date }) => text(await db.getNutrientTimingBuckets(DB(), start_date, end_date)),
@@ -692,6 +724,7 @@ export class MyMCP extends McpAgent<Env> {
           recent_days: z.number().int().positive().optional().describe("Window in days for the recent rate (default 14)"),
           medium_days: z.number().int().positive().optional().describe("Window in days for the medium rate (default 28)"),
         },
+        outputSchema: OUT.detect_stall,
         annotations: READ_ONLY,
       },
       async ({ recent_days, medium_days }) => text(await db.detectStall(DB(), recent_days, medium_days)),
@@ -712,6 +745,7 @@ export class MyMCP extends McpAgent<Env> {
         inputSchema: {
           days: z.number().int().min(1).max(365).optional().describe("Look-back window in days (default 28). Use 90 for a quarterly view."),
         },
+        outputSchema: OUT.micro_gap_analysis,
         annotations: READ_ONLY,
       },
       async ({ days }) => text(await db.getMicroGapAnalysis(DB(), days)),
@@ -730,6 +764,7 @@ export class MyMCP extends McpAgent<Env> {
           "program prescribes. Nutrition comes from your last export (not the live /today feed). " +
           "Omit both dates for the last 60 days.",
         inputSchema: { ...dateRange, detail: z.enum(["days"]).optional().describe("'days' adds the per-day classified rows") },
+        outputSchema: OUT.get_training_day_nutrition,
         annotations: READ_ONLY,
       },
       async ({ start_date, end_date, detail }) => text(await db.getTrainingDayNutrition(DB(), start_date, end_date, detail)),
@@ -748,6 +783,7 @@ export class MyMCP extends McpAgent<Env> {
         inputSchema: {
           since_date: z.string().optional().describe("YYYY-MM-DD — only return PRs detected on or after this date"),
         },
+        outputSchema: OUT.get_pr_alerts,
         annotations: READ_ONLY,
       },
       async ({ since_date }) => text(await db.getPrAlerts(DB(), since_date)),
@@ -816,6 +852,7 @@ export class MyMCP extends McpAgent<Env> {
             .describe("USDA data types (default Foundation, SR Legacy, Branded; add 'Survey (FNDDS)' for typical prepared dishes)"),
           brand: z.string().optional().describe("USDA brand-owner filter, e.g. 'Kraft Heinz'"),
         },
+        outputSchema: OUT.search_food,
         annotations: READ_ONLY,
       },
       async ({ query, sources, limit, data_types, brand }) => {
@@ -856,6 +893,7 @@ export class MyMCP extends McpAgent<Env> {
           servings: z.number().positive().optional().describe("Number of label/household servings eaten (default 1 when grams is omitted)"),
           portion: z.string().optional().describe("Pick a household portion by (partial) description from the food's portions list, e.g. 'cup'"),
         },
+        outputSchema: OUT.get_food_nutrients,
         annotations: READ_ONLY,
       },
       async ({ source, id, grams, servings, portion }) => {
@@ -882,6 +920,7 @@ export class MyMCP extends McpAgent<Env> {
           grams: z.number().positive().optional(),
           servings: z.number().positive().optional(),
         },
+        outputSchema: OUT.lookup_barcode,
         annotations: READ_ONLY,
       },
       async ({ barcode, grams, servings }) => {
@@ -926,6 +965,7 @@ export class MyMCP extends McpAgent<Env> {
           "Connector-style food search over the user's saved foods, USDA and Open Food Facts. Returns {results:[{id,title,url}]}; " +
           "pass an id to `fetch` for full nutrients. Prefer search_food when you can call it directly.",
         inputSchema: { query: z.string().min(1) },
+        outputSchema: OUT.search,
         annotations: READ_ONLY,
       },
       async ({ query }) => {
@@ -959,6 +999,7 @@ export class MyMCP extends McpAgent<Env> {
           "Connector-style document fetch for an id returned by `search` (usda:<fdcId>, off:<barcode>, saved:<name>). " +
           "Returns {id,title,text,url,metadata} where metadata carries the nutrient dictionary and log_food_args.",
         inputSchema: { id: z.string().min(1) },
+        outputSchema: OUT.fetch,
         annotations: READ_ONLY,
       },
       async ({ id }) => {
@@ -1021,6 +1062,7 @@ export class MyMCP extends McpAgent<Env> {
             .describe("Optional component breakdown, each with its own nutrients; MacroFactor shows them when the entry is expanded"),
           intended_time: intendedTimeField,
         },
+        outputSchema: OUT.log_food,
         annotations: WRITE_HINT,
       },
       async (args) => {
@@ -1066,6 +1108,7 @@ export class MyMCP extends McpAgent<Env> {
           llm_prompt: foodItemShape.llm_prompt,
           intended_time: intendedTimeField,
         },
+        outputSchema: OUT.log_saved_food,
         annotations: WRITE_HINT,
       },
       async ({ food, servings, exact, source, llm_prompt, intended_time }) => {
@@ -1159,6 +1202,7 @@ export class MyMCP extends McpAgent<Env> {
           llm_prompt: foodItemShape.llm_prompt,
           intended_time: intendedTimeField,
         },
+        outputSchema: OUT.log_recipe,
         annotations: WRITE_HINT,
       },
       async ({ name, ingredients, icon, brand, serving, notes, llm_prompt, intended_time }) => {
@@ -1203,6 +1247,7 @@ export class MyMCP extends McpAgent<Env> {
             .describe("Override the entry name, e.g. 'Lunch'. Auto-inferred from start_hour if omitted."),
           intended_time: intendedTimeField,
         },
+        outputSchema: OUT.relog_meal,
         annotations: WRITE_HINT,
       },
       async ({ date, start_hour, end_hour, meal_name, intended_time }) => {
@@ -1266,6 +1311,7 @@ export class MyMCP extends McpAgent<Env> {
             .max(30)
             .describe("Foods to log together. Each item is the nutrients for the portion eaten."),
         },
+        outputSchema: OUT.log_foods_batch,
         annotations: WRITE_HINT,
       },
       async ({ items }) => {
@@ -1299,6 +1345,7 @@ export class MyMCP extends McpAgent<Env> {
         inputSchema: {
           ml: z.number().describe("Amount of water in milliliters, e.g. 500"),
         },
+        outputSchema: OUT.log_water,
         annotations: WRITE_HINT,
       },
       async ({ ml }) => {
@@ -1328,6 +1375,7 @@ export class MyMCP extends McpAgent<Env> {
           ),
           unit: z.enum(["kg", "lbs"]).optional().describe("Unit of the value. Default: 'kg'."),
         },
+        outputSchema: OUT.log_weight,
         annotations: WRITE_HINT,
       },
       async ({ kg, unit }) => {
@@ -1355,6 +1403,7 @@ export class MyMCP extends McpAgent<Env> {
           "Call this when data_status / get_today looks stale and you need current numbers; then re-query after the " +
           "user confirms.",
         inputSchema: {},
+        outputSchema: OUT.refresh_from_phone,
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       },
       async () => {
@@ -1381,6 +1430,7 @@ export class MyMCP extends McpAgent<Env> {
           "already claimed it — i.e. logs the user has requested but NOT yet confirmed by tapping. Pairs with cancel_pending_log. " +
           "recent_dispatches shows the last 24h of foods the phone pulled and whether each was confirmed landed.",
         inputSchema: {},
+        outputSchema: OUT.get_pending_logs,
         annotations: READ_ONLY,
       },
       async () => text(await db.getPendingLogs(DB())),
@@ -1402,6 +1452,7 @@ export class MyMCP extends McpAgent<Env> {
             .optional()
             .describe("'food', 'water', 'weight', 'batch', or 'all' (default). Omit to cancel everything."),
         },
+        outputSchema: OUT.cancel_pending_log,
         annotations: WRITE_HINT,
       },
       async ({ queue = "all" }) => {

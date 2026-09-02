@@ -1,6 +1,6 @@
 # MacroFactor MCP — Claude Project Reference
 
-**42 tools as of 2026-09-02 (jamesj64 fork; +2 optional water/weight tools). Paste this file into the Claude project you use with this connector as context.** The server also ships MCP `instructions` with the logging playbook.
+**42 tools as of 2026-09-02 (jamesj64 fork; +2 optional water/weight tools). Every tool declares an MCP output schema and returns `structuredContent` (arrays wrapped as `{items, count}`). Paste this file into the Claude project you use with this connector as context.** The server also ships MCP `instructions` with the logging playbook.
 
 ---
 
@@ -112,7 +112,7 @@ Per-day macro totals, TDEE, scale/trend weight, steps, and alcohol_g.
 | start_date | YYYY-MM-DD (optional) | 14 days ago |
 | end_date | YYYY-MM-DD (optional) | today |
 
-**Response:** Array of day objects: `{date, calories, protein, carbs, fat, expenditure, scale_weight, trend_weight, fat_percent, steps, alcohol_g?, live?, suspect?, source?, updated_at?}`. Current day is live-overlaid (`live:true`, `source:"today-summary"`). `suspect:"kcal_macro_mismatch"` on finalized days where reported kcal diverges from 4/4/9/7 estimate by >7.5% (min 100 kcal). `alcohol_g` omitted when zero.
+**Response:** Array of day objects: `{date, calories, protein, carbs, fat, expenditure, scale_weight, trend_weight, fat_percent, steps, alcohol_g?, live?, suspect?, source?, updated_at?}`. Current day is live-overlaid (`live:true`, `source:"today-summary"`). `suspect:"kcal_macro_mismatch"` on finalized days where reported kcal diverges from 4/4/9/7 estimate by >7.5% (min 100 kcal). `alcohol_g` omitted when zero. Returned wrapped as `{items: [...], count}` (structured output).
 
 **When to use:** Rolling calorie / macro / weight trend context. Always covers today live.
 
@@ -128,7 +128,7 @@ Per-day micronutrient totals from the Micronutrients export sheet.
 | nutrients | string[] (optional) | — |
 | detail | "full" (optional) | — |
 
-**Response:** Array of `{date, <nutrient_key>: value, ..., suspect?: {<key>: value}}`. Default set: 25 NIH-reference nutrients + Alcohol (g), Sugars (g), Saturated Fat (g), Caffeine (mg) — 29 total. `nutrients` param filters to names containing any term (case-insensitive). `detail:"full"` returns all export columns. `suspect` object on days with implausible values (never altered).
+**Response:** Array of `{date, <nutrient_key>: value, ..., suspect?: {<key>: value}}`. Default set: 25 NIH-reference nutrients + Alcohol (g), Sugars (g), Saturated Fat (g), Caffeine (mg) — 29 total. `nutrients` param filters to names containing any term (case-insensitive). `detail:"full"` returns all export columns. `suspect` object on days with implausible values (never altered). Returned wrapped as `{items: [...], count}` (structured output).
 
 **When to use:** Micronutrient adequacy checks, vitamin D, omega-3, fiber gaps. Pass `nutrients:["magnesium","zinc"]` to narrow. Use `micro_gap_analysis` for averaged status vs RDA.
 
@@ -142,7 +142,7 @@ Individual logged food items with time, serving, and macros.
 | start_date | YYYY-MM-DD (optional) | 7 days ago |
 | end_date | YYYY-MM-DD (optional) | today |
 
-**Response:** Array of `{date, time, name, calories, protein, carbs, fat, fiber?, sugar?, sodium_mg?, brand?, suspect?:[]}`. `suspect` is an array of flag strings: `"kcal_macro_mismatch"`, `"zero_protein_on_protein_food"`.
+**Response:** Array of `{date, time, name, calories, protein, carbs, fat, fiber?, sugar?, sodium_mg?, brand?, suspect?:[]}`. `suspect` is an array of flag strings: `"kcal_macro_mismatch"`, `"zero_protein_on_protein_food"`. Returned wrapped as `{items: [...], count}` (structured output).
 
 **When to use:** Meal-by-meal breakdown, spotting entry errors, checking what was eaten at a specific time. Note: `time` reflects when logged in MacroFactor (which equals tap-time for MCP-queued foods, unless intended_time matched).
 
@@ -170,7 +170,7 @@ Daily TDEE alongside intake and weight.
 | start_date | YYYY-MM-DD (optional) | 30 days ago |
 | end_date | YYYY-MM-DD (optional) | today |
 
-**Response:** Array of `{date, calories, expenditure, scale_weight, trend_weight}`.
+**Response:** Array of `{date, calories, expenditure, scale_weight, trend_weight}`. Returned wrapped as `{items: [...], count}` (structured output).
 
 **When to use:** Comparing intake vs TDEE, checking metabolic adaptation over time.
 
@@ -184,7 +184,7 @@ Daily step count.
 | start_date | YYYY-MM-DD (optional) | 30 days ago |
 | end_date | YYYY-MM-DD (optional) | today |
 
-**Response:** Array of `{date, steps}`.
+**Response:** Array of `{date, steps}`. Returned wrapped as `{items: [...], count}` (structured output).
 
 ---
 

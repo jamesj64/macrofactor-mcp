@@ -55,6 +55,8 @@ refresh (`refresh_from_phone` → "MacroFactor Refresh" notification → MF Nigh
 
 ## Tools (42, plus 2 optional)
 
+Every tool declares an MCP output schema and returns structured content (array results are wrapped as `{items, count}`), so clients like Claude and ChatGPT can reason about result shapes.
+
 **Food search**
 
 | Tool | What it does |
