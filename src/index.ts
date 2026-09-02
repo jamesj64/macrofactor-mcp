@@ -1623,7 +1623,7 @@ async function handlePendingAll(request: Request, env: Env): Promise<Response> {
   });
 }
 
-// POST /sync-ack?token=<INGEST_SECRET>&claim=<ms>[&date=YYYY-MM-DD]
+// POST /sync-ack?token=<INGEST_SECRET>&claim=<ms>[&date=YYYY-MM-DD]   (claim may also be a `claim` header)
 // Body (optional): the MacroFactorTodaySummary returned by the last Log by JSON / Log Water /
 // Log Weight action — {consumed, remaining}. Deletes the claimed rows, marks the food dispatches
 // landed, and refreshes the live today row from the summary.
@@ -1633,7 +1633,8 @@ async function handleSyncAck(request: Request, env: Env): Promise<Response> {
   const token = request.headers.get("x-ingest-secret") || url.searchParams.get("token");
   if (!env.INGEST_SECRET || token !== env.INGEST_SECRET) return json({ error: "unauthorized" }, 401);
 
-  const claimRaw = url.searchParams.get("claim");
+  // The claim stamp may arrive as a header (easiest to wire in Shortcuts) or a query param.
+  const claimRaw = request.headers.get("claim") || request.headers.get("x-claim") || url.searchParams.get("claim");
   const claim = claimRaw != null ? parseInt(claimRaw, 10) : NaN;
   const acked = Number.isFinite(claim) && claim > 0 ? await db.ackClaim(env.DB, claim, Date.now()) : null;
 

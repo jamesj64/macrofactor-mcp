@@ -48,8 +48,10 @@ crashes, the items are re-served after 10 minutes.
       wants your display unit (lbs), insert **Calculate** (Repeat Item × 2.20462) first.
 13. **End Repeat**.
 14. **Get Contents of URL**:
-    - URL: `https://macrofactor-mcp.<your-subdomain>.workers.dev/sync-ack?token=<INGEST_SECRET>&claim=[Dictionary Value from step 4]`
+    - URL: `https://macrofactor-mcp.<your-subdomain>.workers.dev/sync-ack?token=<INGEST_SECRET>`
     - Method **POST**
+    - Headers: add `claim` = the **Dictionary Value** from step 4 (tap the value field → Select Variable).
+      (Inserting it into the URL as `&claim=…` works too; the header is just easier to wire.)
     - Request Body: **File** → the **Log by JSON** result from step 6 (the last one wins). If you skip the
       body the ack still clears the queue; you just won't get live today totals.
 15. *(Optional)* **Show Notification** ← the step-14 result — you'll see `{"ok":true,"acked":{...},"today":{...}}`.
