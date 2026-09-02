@@ -178,6 +178,13 @@ npm test                         # schema tests against MacroFactor's official s
   identifier (`MF_SOURCE` in `wrangler.jsonc`) as MacroFactor asks.
 - No private API. Optional: email `support@macrofactor.com` to confirm automation use in writing.
 
+## Apple Health
+
+MacroFactor syncs daily calories, macros and body weight to Apple Health. The server tells agents (in its MCP
+instructions and in `data_status`) that an Apple Health tool in the client, when available, can fill those
+series for days not covered by an export. This server stays the source for today's live totals, targets,
+saved foods and all logging.
+
 ## Known limits
 
 - Entries land at **sync time** — MacroFactor's actions have no date field. Pass `intended_time`

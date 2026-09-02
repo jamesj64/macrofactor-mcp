@@ -173,7 +173,12 @@ Logging playbook ("add a jersey mike's giant turkey sub, no toppings"):
    llm_prompt = the user's original words verbatim. State the numbers you used and any assumptions in your reply.
 4. Tell the user to tap the notification; get_today (live) or get_pending_logs (landed:true) confirms it.
 Never fabricate precision: if a chain publishes ranges or you estimated, say so in notes and in your reply.
-Use get_today for "what's left today", weekly_review for check-ins, cancel_pending_log for "never mind".`;
+Use get_today for "what's left today", weekly_review for check-ins, cancel_pending_log for "never mind".
+
+Data freshness: history tools read the user's last MacroFactor export (data_status shows its age). The user also
+syncs MacroFactor to Apple Health, so if this server's history is empty or stale and your client offers an Apple
+Health tool/connector, daily calories, protein, carbs, fat and body weight are usually available there. Prefer this
+server for today's live totals, targets/remaining, saved foods, and all logging; use Apple Health only to fill gaps.`;
 
 // Recompute all-time PRs from workout_sets, write any new ones to pr_alerts, and fire the
 // "New PR" Pushcut push. Runs in a background context (ctx.waitUntil after /upload-export and
@@ -216,7 +221,8 @@ export class MyMCP extends McpAgent<Env> {
           "current even if your last export is older. Export days where the reported kcal diverges from " +
           "the 4/4/9/7 macro estimate by >7.5% (min 100 kcal) carry suspect:\"kcal_macro_mismatch\" — " +
           "treat those totals with caution (the live-overlaid current day is never flagged). " +
-          "Omit both dates for the last 14 days.",
+          "Omit both dates for the last 14 days. Days missing here (no export yet) may be available via an " +
+          "Apple Health tool in your client — the user syncs MacroFactor to Apple Health.",
         inputSchema: dateRange,
         annotations: READ_ONLY,
       },
@@ -272,7 +278,8 @@ export class MyMCP extends McpAgent<Env> {
           "Scale weight, trend weight (kg) and body-fat % over time. Returns {entries, note} — entries is the " +
           "array of daily rows; consecutive readings where fat_percent jumps >3 points are tagged " +
           "method_change_suspected:true on the later row (usually a device or estimation-method change, not " +
-          "real body-composition change). Omit both dates for the last 60 days.",
+          "real body-composition change). Omit both dates for the last 60 days. Body weight is also synced to " +
+          "Apple Health by MacroFactor, so an Apple Health tool in your client can fill dates missing here.",
         inputSchema: dateRange,
         annotations: READ_ONLY,
       },
@@ -319,11 +326,21 @@ export class MyMCP extends McpAgent<Env> {
       "data_status",
       {
         title: "Data freshness",
-        description: "How much data is loaded and its most recent date. Use to check if data is stale.",
+        description:
+          "How much data is loaded and its most recent date. Use to check if data is stale. If the export data is " +
+          "empty or old, note that the user syncs MacroFactor to Apple Health — an Apple Health tool in your client " +
+          "(if any) can supply daily calories/macros and body weight for the gap.",
         inputSchema: {},
         annotations: READ_ONLY,
       },
-      async () => text(await db.dataStatus(DB())),
+      async () =>
+        text({
+          ...(await db.dataStatus(DB())),
+          alternative_sources:
+            "Daily calories/protein/carbs/fat and body weight are also synced by MacroFactor into Apple Health; if this " +
+            "export data is stale or missing and an Apple Health tool is available in your client, use it for those " +
+            "series. This server remains the source for today's live totals, targets, saved foods and logging.",
+        }),
     );
 
     this.server.registerTool(

@@ -801,4 +801,5 @@ Response shapes for `weekly_summary`, `get_adherence`, `get_prs`, `data_status`,
 - **One Shortcut:** `GET /pending-all` + `POST /sync-ack` replace the five per-type Shortcuts; one Pushcut notification (`PUSHCUT_WEBHOOK_URL`). `log_foods_batch` now queues individual `pending_food` rows. Claimed rows are re-served after 10 min without an ack.
 - **Live today from every sync:** `/sync-ack` stores the Today Summary MacroFactor returns from Log by JSON.
 - **Config:** `USER_TZ` and `MF_SOURCE` are `wrangler.jsonc` vars; `USDA_API_KEY` secret. `PUSHCUT_WATER/WEIGHT/BATCH_WEBHOOK_URL` removed.
+- **Apple Health hint:** the MCP instructions, `data_status` (`alternative_sources`), `get_daily_nutrition` and `get_weight_history` tell the agent that MacroFactor also syncs daily energy/macros and body weight to Apple Health, so an Apple Health tool in the client can fill gaps when export data is stale.
 - **Tests:** `npm test` validates payloads against MacroFactor's official sample JSON; `scripts/local-e2e.mjs` exercises the whole write path against `npm run dev` without a phone.
