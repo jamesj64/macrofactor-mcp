@@ -1638,10 +1638,11 @@ async function handleToday(request: Request, env: Env): Promise<Response> {
 }
 
 // POST /foods-seen?token=<INGEST_SECRET>[&date=YYYY-MM-DD]
-// Nightly "Find Recent Food" feed: the foods MacroFactor lists as consumed on `date` (default:
-// today in USER_TZ). Body: whatever the Shortcut can produce — a JSON array of dictionaries,
-// {items:[...]}, or plain text with one food name per line. Replaces that date's shortcut-sourced
-// food_log rows; echoes how the body was interpreted so a mis-wired Shortcut is easy to fix.
+// "Find Recent Food" feed (unfiltered is fine): every food goes into the saved-foods library; foods
+// whose Time Last Consumed falls on `date` (default: today in USER_TZ) — or that carry no date —
+// replace that date's shortcut-sourced food_log rows. Body: pipe-delimited lines, a JSON array of
+// dictionaries, or {items:[...]}. Echoes how the body was interpreted so a mis-wired Shortcut is easy
+// to fix (&dry_run=1 previews without storing).
 async function handleFoodsSeen(request: Request, env: Env): Promise<Response> {
   if (request.method !== "POST") return json({ error: "POST only" }, 405);
   const url = new URL(request.url);
@@ -1673,11 +1674,12 @@ async function handleFoodsSeen(request: Request, env: Env): Promise<Response> {
   if (url.searchParams.get("dry_run") === "1") {
     return json({ ok: true, date, dry_run: true, shape: parsed.shape, rows: parsed.rows, unrecognized_keys: parsed.unrecognized, received_start: raw.slice(0, 300) });
   }
-  const { stored, library } = await db.replaceFoodsSeen(env.DB, date, parsed.rows);
+  const { stored, library, other_days } = await db.replaceFoodsSeen(env.DB, date, parsed.rows);
   return json({
     ok: true,
     date,
     stored,
+    other_days_skipped: other_days,
     library_upserted: library,
     shape: parsed.shape,
     ...(parsed.unrecognized.length ? { unrecognized_keys: parsed.unrecognized } : {}),

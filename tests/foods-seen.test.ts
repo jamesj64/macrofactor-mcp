@@ -14,17 +14,19 @@ describe("foods-seen parsing", () => {
     ].join("\n");
     const { rows, shape } = parseFoodsSeen(body);
     expect(shape).toBe("text-lines");
-    expect(rows.map((r) => [r.name, r.brand, r.time, r.calories, r.protein])).toEqual([
-      ["Greek yogurt", "Chobani", "08:15", 150, 20],
-      ["Chicken breast", null, "08:00", 330, 62],
-      ["Chicken breast", null, "13:05", 330, 62],
-      ["Black coffee", null, null, 2, null],
+    expect(rows.map((r) => [r.name, r.brand, r.date, r.time, r.calories, r.protein])).toEqual([
+      ["Greek yogurt", "Chobani", null, "08:15", 150, 20],
+      ["Chicken breast", null, "2026-09-02", "13:05", 330, 62],
+      ["Black coffee", null, null, null, 2, null],
     ]);
+    expect(rows[1].lifetime_count).toBe(2);
+    expect(rows[1].usual_hours).toEqual([8, 13]);
   });
 
-  it("expands consumption count using hours consumed", () => {
-    const { rows } = parseFoodsSeen([{ name: "Oats", "Time Last Consumed": "7:30 PM", "Consumption Count": 3, "Hours Consumed (24 hr)": "7, 12, 19", Energy: 300 }]);
-    expect(rows.map((r) => r.time)).toEqual(["07:00", "12:00", "19:30"]);
+  it("keeps one row per food (count/hours are lifetime stats) and parses dates from Shortcuts' date text", () => {
+    const { rows } = parseFoodsSeen([{ name: "Oats", "Time Last Consumed": "Aug 30, 2026 at 7:30 PM", "Consumption Count": 47, "Hours Consumed (24 hr)": "7, 12, 19", Energy: 300 }]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ date: "2026-08-30", time: "19:30", lifetime_count: 47, usual_hours: [7, 12, 19] });
   });
 
   it("accepts wrapped text and dictionaries with nutrients", () => {

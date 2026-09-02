@@ -312,6 +312,17 @@ export function toLocalHHMM(v: unknown): string | null {
   return null;
 }
 
+// Calendar date (YYYY-MM-DD, user's zone) from an ISO datetime or "Sep 2, 2026 at 1:05 PM"; null when
+// the value carries no date (a bare time, or unparseable).
+export function toLocalDate(v: unknown): string | null {
+  if (v == null) return null;
+  const s = String(v).trim();
+  if (/^\d{1,2}:\d{2}(:\d{2})?\s*(AM|PM|am|pm)?$/.test(s)) return null;
+  const d = new Date(s.replace(/\bat\b/i, ""));
+  if (Number.isNaN(d.getTime())) return null;
+  return new Intl.DateTimeFormat("en-CA", { timeZone: getUserTz(), year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+}
+
 const numOrNull = (v: unknown): number | null => {
   if (v == null || v === "") return null;
   const n = parseFloat(String(v).replace(/[^0-9.\-]/g, ""));
@@ -325,29 +336,24 @@ function parseHours(v: unknown): number[] {
   return (src.match(/\d{1,2}/g) ?? []).map((x) => parseInt(x, 10)).filter((h) => h >= 0 && h <= 23);
 }
 
-// One Recent Food → 1..N food_log rows (one per consumption). The last consumption gets the exact
-// Time Last Consumed; earlier ones get HH:00 from Hours Consumed; extra count beyond known hours
-// reuses the last known time.
+// One Recent Food → ONE food_log row at its Time Last Consumed. MacroFactor's Consumption Count and
+// Hours Consumed describe the food's whole history, not the current day, so they are kept only as
+// diagnostics (a second helping of the same food on the same day shows once; day totals come from
+// the Today Summary, not from these rows).
 function expandFood(f: {
-  name: string; brand?: string | null; time: string | null; count: number | null; hours: number[];
+  name: string; brand?: string | null; date: string | null; time: string | null; count: number | null; hours: number[];
   calories: number | null; protein: number | null; carbs: number | null; fat: number | null;
   serving_size?: string | null; serving_qty?: number | null; serving_weight_g?: number | null;
 }): any[] {
-  const base = {
+  return [{
     name: f.name,
     brand: f.brand ?? null,
+    date: f.date,
+    time: f.time,
     serving_size: f.serving_size ?? null, serving_qty: f.serving_qty ?? null, serving_weight_g: f.serving_weight_g ?? null,
     calories: f.calories, protein: f.protein, carbs: f.carbs, fat: f.fat,
-  };
-  const n = Math.max(1, Math.min(f.count ?? 1, 20));
-  if (n === 1) return [{ ...base, time: f.time }];
-  const lastHour = f.time ? parseInt(f.time.slice(0, 2), 10) : null;
-  const hours = [...new Set(f.hours)].filter((h) => h !== lastHour).sort((a, b) => a - b);
-  const times: string[] = hours.map((h) => `${String(h).padStart(2, "0")}:00`);
-  while (times.length < n - 1) times.push(f.time ?? (times[times.length - 1] ?? "12:00"));
-  const rows: any[] = times.slice(0, n - 1).map((t) => ({ ...base, time: t }));
-  rows.push({ ...base, time: f.time });
-  return rows.sort((a, b) => String(a.time ?? "").localeCompare(String(b.time ?? "")));
+    lifetime_count: f.count, usual_hours: f.hours,
+  }];
 }
 
 function fromObject(o: Record<string, unknown>): any[] | null {
@@ -356,10 +362,12 @@ function fromObject(o: Record<string, unknown>): any[] | null {
   if (!name) return null;
   const g = (macro: string) => numOrNull(firstKey(o, MACRO_KEYS[macro]) ?? (macro === "calories" ? nutrients.energy : nutrients[macro]));
   const serving = o.serving ?? o.Serving ?? o.serving_size ?? o["Serving Size"];
+  const when = firstKey(o, TIME_KEYS);
   return expandFood({
     name: String(name).trim(),
     brand: (firstKey(o, ["brand", "Brand"]) as string | undefined) ?? null,
-    time: toLocalHHMM(firstKey(o, TIME_KEYS)),
+    date: toLocalDate(when),
+    time: toLocalHHMM(when),
     count: numOrNull(firstKey(o, ["count", "Count", "Consumption Count", "consumption_count", "consumptionCount"])),
     hours: parseHours(firstKey(o, ["hours", "Hours", "Hours Consumed (24 hr)", "Hours Consumed", "hours_consumed", "hoursConsumed"])),
     calories: g("calories"), protein: g("protein"), carbs: g("carbs"), fat: g("fat"),
@@ -370,7 +378,7 @@ function fromObject(o: Record<string, unknown>): any[] | null {
 }
 
 interface LineFood {
-  name: string; brand: string | null; time: string | null; count: number | null; hours: number[];
+  name: string; brand: string | null; date: string | null; time: string | null; count: number | null; hours: number[];
   calories: number | null; protein: number | null; carbs: number | null; fat: number | null;
 }
 
@@ -379,7 +387,7 @@ function fromLine(line: string): LineFood | null {
   if (!parts[0]) return null;
   const [name, brand, time, count, energy, protein, carbs, fat, ...rest] = parts;
   return {
-    name, brand: brand || null, time: toLocalHHMM(time), count: numOrNull(count), hours: parseHours(rest.join(",")),
+    name, brand: brand || null, date: toLocalDate(time), time: toLocalHHMM(time), count: numOrNull(count), hours: parseHours(rest.join(",")),
     calories: numOrNull(energy), protein: numOrNull(protein), carbs: numOrNull(carbs), fat: numOrNull(fat),
   };
 }
@@ -428,20 +436,24 @@ export function parseFoodsSeen(body: unknown): { rows: any[]; unrecognized: stri
   return { rows, unrecognized: [...unrecognized], shape };
 }
 
-export async function replaceFoodsSeen(DB: D1Database, date: string, rows: any[]): Promise<{ stored: number; library: number }> {
+export async function replaceFoodsSeen(
+  DB: D1Database, date: string, rows: any[],
+): Promise<{ stored: number; library: number; other_days: number }> {
+  // Food log: only foods whose last consumption falls on `date` (or that carry no date at all).
+  const todays = rows.filter((r) => !r.date || r.date === date);
   const stmts: D1PreparedStatement[] = [DB.prepare(`DELETE FROM food_log WHERE date = ? AND source = 'shortcut'`).bind(date)];
   const ins = DB.prepare(
     `INSERT INTO food_log (date, time, name, serving_size, serving_qty, serving_weight_g, calories, protein, carbs, fat, source)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'shortcut')`,
   );
-  for (const r of rows) {
+  for (const r of todays) {
     const name = r.brand ? `${r.name} (${r.brand})` : r.name;
     stmts.push(ins.bind(date, r.time ?? null, name, r.serving_size ?? null, r.serving_qty ?? null, r.serving_weight_g ?? null, r.calories ?? null, r.protein ?? null, r.carbs ?? null, r.fat ?? null));
   }
 
-  // Saved-foods library from what was actually eaten: one 'recent' row per distinct food, macros as
-  // last logged (one portion). Export rows (favorite/custom/history) are left alone and win ties;
-  // the importer preserves 'recent' rows across uploads.
+  // Saved-foods library from EVERY food in the post (any date): one 'recent' row per distinct food,
+  // macros as last logged (one portion). Export rows (favorite/custom/history) are left alone and
+  // win ties; the importer preserves 'recent' rows across uploads.
   const seen = new Map<string, any>();
   for (const r of rows) if (r.calories != null) seen.set(`${r.name}\u0000${r.brand ?? ""}`, r);
   const delLib = DB.prepare(`DELETE FROM food_library WHERE source = 'recent' AND name = ? AND IFNULL(brand, '') = ?`);
@@ -453,6 +465,7 @@ export async function replaceFoodsSeen(DB: D1Database, date: string, rows: any[]
     stmts.push(delLib.bind(r.name, r.brand ?? ""));
     stmts.push(insLib.bind(r.name, r.brand ?? null, r.serving_size ?? "portion (as last logged)", r.serving_weight_g ?? null, r.calories, r.protein ?? null, r.fat ?? null, r.carbs ?? null));
   }
-  await DB.batch(stmts);
-  return { stored: rows.length, library: seen.size };
+  // D1 batches are limited in size; chunk large library refreshes.
+  for (let i = 0; i < stmts.length; i += 100) await DB.batch(stmts.slice(i, i + 100));
+  return { stored: todays.length, library: seen.size, other_days: rows.length - todays.length };
 }

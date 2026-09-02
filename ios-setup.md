@@ -134,8 +134,9 @@ replaces them). `/today` also accepts individual numbers as query params (`?ener
 
 **Part B — today's foods**
 
-4. **Find Recent Food** — Add Filter: **Time Last Consumed** *is in the last* **24 hours**. Sort by Time
-   Last Consumed. Limit off.
+4. **Find Recent Food** — no filter needed: the server files foods last eaten today into today's food
+   log and puts *every* food into the saved-foods library. (If the unfiltered list is huge and slow, set
+   Sort by **Time Last Consumed**, Order **Latest First**, and a Limit of a few hundred.)
 5. **Repeat with Each** ← Recent Food. Inside the loop add ONE **Text** action containing the Repeat Item's
    properties separated by `|`, in exactly this order (tap the variable → pick the property):
 
@@ -156,10 +157,12 @@ https://macrofactor-mcp.<your-subdomain>.workers.dev/foods-seen?token=<INGEST_SE
    (`shape`, `sample`, `unrecognized_keys`) without storing; then remove it. A JSON array of dictionaries
    or `{items:[…]}` is accepted too.
 
-The server turns each food into one `food_log` row per consumption (Consumption Count × Hours Consumed,
-the last one at Time Last Consumed) tagged `shortcut`; an export's Food Log CSV replaces them. It also
-upserts every food into the saved-foods library as source `recent` (macros of the portion last logged), so
-`search_my_foods` / `log_saved_food` work from what you actually eat — those rows survive export uploads.
+The server writes one `food_log` row per food last eaten today (at its Time Last Consumed) tagged
+`shortcut` — Consumption Count / Hours Consumed are lifetime stats, so a second helping of the same food
+shows once; day totals come from Part A, not from these rows. An export's Food Log CSV replaces them. Every
+food in the post (any date) is upserted into the saved-foods library as source `recent` (macros of the
+portion last logged), so `search_my_foods` / `log_saved_food` work from what you actually eat — those rows
+survive export uploads.
 
 **On demand:** because MF Sync ends with *Run Shortcut → MF Nightly*, the agent's `refresh_from_phone`
 tool (or any tap of the MacroFactor notification) refreshes all of this whenever it's needed.
