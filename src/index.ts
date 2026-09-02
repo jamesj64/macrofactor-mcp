@@ -148,7 +148,7 @@ function detailRow(d: FoodDetail, want: { grams?: number; servings?: number; por
     portions: d.portions.slice(0, 12),
     ...(d.ingredients ? { ingredients: d.ingredients } : {}),
     log_food_args: {
-      name: d.brand ? `${d.name} (${d.brand})` : d.name,
+      name: d.name,
       ...(d.brand ? { brand: d.brand } : {}),
       serving: amt.serving,
       nutrients,

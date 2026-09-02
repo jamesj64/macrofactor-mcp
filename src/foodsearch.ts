@@ -60,6 +60,11 @@ function pick(n: Nutrients, keys: NutrientKey[]): Nutrients {
 
 const r1 = (x: number) => Math.round(x * 10) / 10;
 
+function titleCaseIfShouting(str: string): string {
+  if (str !== str.toUpperCase() || !/[A-Z]/.test(str)) return str;
+  return str.toLowerCase().replace(/(^|[\s\-/(])([a-z])/g, (m, pre, ch) => pre + ch.toUpperCase());
+}
+
 // =====================================================================================
 // USDA FoodData Central
 // =====================================================================================
@@ -166,7 +171,13 @@ function usdaHit(food: any, full: boolean): FoodDetail {
   const per100g = usdaNutrients(food.foodNutrients);
   const portions = usdaPortions(food);
   const serving = portions[0];
-  const brand = [food.brandOwner, food.brandName].filter(Boolean).join(" · ") || undefined;
+  // Prefer the consumer-facing brand ("Lucky Charms") over the corporate owner ("GENERAL MILLS SALES INC.");
+  // owner strings are usually shouting, so title-case them when they are the only option.
+  const brand = food.brandName
+    ? String(food.brandName).trim()
+    : food.brandOwner
+      ? titleCaseIfShouting(String(food.brandOwner).trim())
+      : undefined;
   return {
     source: "usda",
     id: String(food.fdcId),
