@@ -1,5 +1,6 @@
 import { todayLocal, extractTodaySummary, safeParse, ageFrom, round, pickNum, getUserTz } from "./utils";
-import { resolveTarget } from "./nutrition";
+import { resolveTarget, targetPool } from "./nutrition";
+import { weekdayOf } from "./utils";
 import { NUTRIENT_KEYS, type NutrientKey } from "../mf-schema";
 
 // ---- Live "today" feed (MacroFactor Today-Summary shortcut → POST /today) ----
@@ -186,7 +187,43 @@ export const EXPORT_COLUMN: Partial<Record<NutrientKey, string>> = {
   tryptophan: "Tryptophan (g)", tyrosine: "Tyrosine (g)", valine: "Valine (g)", cystine: "Cystine (g)",
 };
 
-export async function recordDaySnapshot(DB: D1Database, date: string, consumed: Record<string, unknown>) {
+const WEEKDAYS7 = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+// Targets derived from a Today Summary: goal = consumed + remaining.target. Written as a 7-row
+// "program" dated `date` (expenditure_mode = 'live-derived'), copying the other weekdays from the
+// program in force so weekday cycling is preserved; an export's own program rows replace it later.
+async function recordDerivedTargets(DB: D1Database, date: string, consumed: Record<string, unknown>, remaining: Record<string, unknown>) {
+  const goal = (k: string): number | null => {
+    const c = pickNum(consumed, k);
+    const r = (remaining as any)?.[k];
+    const t = r && typeof r === "object" ? pickNum(r, "target") : null;
+    return c != null && t != null ? round(c + t, k === "energy" ? 0 : 1) : null;
+  };
+  const energy = goal("energy");
+  if (energy == null) return false;
+  const todayRow = { calories: energy, protein: goal("protein"), carbs: goal("carbs"), fat: goal("fat") };
+  const existing = (await DB.prepare(`SELECT * FROM nutrition_targets`).all()).results as any[];
+  const { pool } = targetPool(existing.filter((t) => t.program_date !== date), date);
+  const wd = weekdayOf(date);
+  const stmts: D1PreparedStatement[] = [DB.prepare(`DELETE FROM nutrition_targets WHERE program_date = ?`).bind(date)];
+  const ins = DB.prepare(
+    `INSERT INTO nutrition_targets (program_date, weekday, calories, protein, carbs, fat, expenditure, daily_average, weight, expenditure_mode)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'live-derived')`,
+  );
+  const rows = WEEKDAYS7.map((day) => {
+    const prev = pool.find((t) => t.weekday === day) ?? pool[0];
+    const r = day === wd || !prev ? todayRow : { calories: prev.calories, protein: prev.protein, carbs: prev.carbs, fat: prev.fat };
+    return { day, ...r, expenditure: prev?.expenditure ?? null, weight: prev?.weight ?? null };
+  });
+  const avg = round(rows.reduce((a, r) => a + (r.calories ?? 0), 0) / 7, 0);
+  for (const r of rows) stmts.push(ins.bind(date, r.day, r.calories, r.protein, r.carbs, r.fat, r.expenditure, avg, r.weight));
+  await DB.batch(stmts);
+  return true;
+}
+
+export async function recordDaySnapshot(
+  DB: D1Database, date: string, consumed: Record<string, unknown>, remaining?: Record<string, unknown> | null,
+) {
   const num = (k: string): number | null => pickNum(consumed, k);
   const energy = num("energy"), protein = num("protein"), carbs = num("carbs"), fat = num("fat");
   const stmts: D1PreparedStatement[] = [];
@@ -218,7 +255,11 @@ export async function recordDaySnapshot(DB: D1Database, date: string, consumed: 
     );
   }
   if (stmts.length) await DB.batch(stmts);
-  return { days_row: energy != null, micronutrient_keys: Object.keys(micro).length - (micro._source ? 1 : 0) };
+  let targets = false;
+  if (remaining && typeof remaining === "object") {
+    try { targets = await recordDerivedTargets(DB, date, consumed, remaining); } catch { targets = false; }
+  }
+  return { days_row: energy != null, micronutrient_keys: Object.keys(micro).length - (micro._source ? 1 : 0), targets };
 }
 
 // ---- Nightly "foods seen" feed (Find Recent Food → POST /foods-seen) ----

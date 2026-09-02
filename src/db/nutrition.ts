@@ -298,7 +298,7 @@ export async function dataStatus(DB: D1Database) {
 
 // The full weekday pool from the latest program snapshot whose program_date <= date (falls back
 // to the earliest program for dates that precede it).
-function targetPool(targets: any[], date: string): { pool: any[]; fallback: boolean } {
+export function targetPool(targets: any[], date: string): { pool: any[]; fallback: boolean } {
   if (!targets.length) return { pool: [], fallback: false };
   const past = targets.filter((t) => t.program_date && t.program_date <= date);
   if (past.length) {
