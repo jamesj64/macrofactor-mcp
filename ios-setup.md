@@ -145,7 +145,9 @@ replaces them). `/today` also accepts individual numbers as query params (`?ener
 ```
 
    Hours Consumed is a list and goes last: if Shortcuts spreads it over extra lines, the server folds
-   those into the food above. **End Repeat.**
+   those into the food above. Tap the inserted **Time Last Consumed** variable and set its Date Format
+   to **ISO 8601** (with time) so the timestamp carries an explicit offset; plain "Sep 2, 2026 at 1:05 PM"
+   text works too. **End Repeat.**
 6. **Combine Text** ← Repeat Results, with **New Lines**.
 7. **Get Contents of URL** — POST, Request Body **File** ← Combined Text:
 

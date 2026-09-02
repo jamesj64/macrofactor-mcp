@@ -290,37 +290,51 @@ function firstKey(obj: Record<string, unknown>, keys: string[]): unknown {
   return undefined;
 }
 
-// "13:05", "1:05 PM", ISO datetimes, or "Sep 2, 2026 at 1:05 PM" → "HH:MM" in the user's zone.
-export function toLocalHHMM(v: unknown): string | null {
-  if (v == null) return null;
+// Shortcuts inserts a Date into Text as wall-clock text in the phone's zone ("Sep 2, 2026 at 1:05 PM",
+// "9/2/26, 1:05 PM") or, if the variable's Date Format is set to ISO 8601, with an explicit offset
+// ("2026-09-02T13:05:00-07:00"). Naive text is taken as-is (parse-as-local + read-as-local round-trips
+// the written fields whatever the runtime's zone); explicit offsets are converted to the user's zone.
+const HAS_OFFSET = /(Z|[+-]\d{2}:?\d{2}|\b(GMT|UTC)\b)\s*$/i;
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+function parseWhen(v: unknown): { date: string | null; time: string | null } {
+  if (v == null) return { date: null, time: null };
   const s = String(v).trim();
+  // bare time
   let m = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM|am|pm)?$/);
   if (m) {
     let h = parseInt(m[1], 10);
     const ap = m[3]?.toUpperCase();
     if (ap === "PM" && h < 12) h += 12;
     if (ap === "AM" && h === 12) h = 0;
-    return `${String(h).padStart(2, "0")}:${m[2]}`;
+    return { date: null, time: `${pad2(h)}:${m[2]}` };
   }
-  const d = new Date(s.replace(/\bat\b/i, ""));
+  const cleaned = s.replace(/\bat\b/i, " ").replace(/\s+/g, " ").trim();
+  const d = new Date(cleaned);
   if (!Number.isNaN(d.getTime())) {
-    const parts = new Intl.DateTimeFormat("en-GB", { timeZone: getUserTz(), hour: "2-digit", minute: "2-digit", hour12: false }).format(d);
-    return parts.replace(/^24/, "00");
+    if (HAS_OFFSET.test(cleaned)) {
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: getUserTz(), year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
+      }).formatToParts(d);
+      const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+      return { date: `${get("year")}-${get("month")}-${get("day")}`, time: `${get("hour").replace(/^24$/, "00")}:${get("minute")}` };
+    }
+    return {
+      date: `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`,
+      time: `${pad2(d.getHours())}:${pad2(d.getMinutes())}`,
+    };
   }
   m = s.match(/(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)?/);
-  if (m) return toLocalHHMM(m[0]);
-  return null;
+  if (m) return { date: null, time: parseWhen(m[0]).time };
+  return { date: null, time: null };
 }
 
-// Calendar date (YYYY-MM-DD, user's zone) from an ISO datetime or "Sep 2, 2026 at 1:05 PM"; null when
-// the value carries no date (a bare time, or unparseable).
+export function toLocalHHMM(v: unknown): string | null {
+  return parseWhen(v).time;
+}
+
 export function toLocalDate(v: unknown): string | null {
-  if (v == null) return null;
-  const s = String(v).trim();
-  if (/^\d{1,2}:\d{2}(:\d{2})?\s*(AM|PM|am|pm)?$/.test(s)) return null;
-  const d = new Date(s.replace(/\bat\b/i, ""));
-  if (Number.isNaN(d.getTime())) return null;
-  return new Intl.DateTimeFormat("en-CA", { timeZone: getUserTz(), year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+  return parseWhen(v).date;
 }
 
 const numOrNull = (v: unknown): number | null => {
