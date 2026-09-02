@@ -160,32 +160,42 @@ function detailRow(d: FoodDetail, want: { grams?: number; servings?: number; por
   };
 }
 
-const MCP_INSTRUCTIONS = `MacroFactor nutrition + training server for one user. Reads come from the app's export (and a live
-today feed); writes are queued and land in MacroFactor only after the user taps a notification on their iPhone
-(or runs the "MF Sync" Shortcut / asks Siri). Logs always land at the CURRENT time — there is no backdating.
+const MCP_INSTRUCTIONS = `MacroFactor nutrition server for ONE user. Everything you log lands in MacroFactor only after the user taps a
+notification on their iPhone (the "MF Sync" Shortcut); it always lands at the CURRENT time — no backdating. Reads come
+from a separate read-only phone feed ("MF Nightly": today's totals, micros, targets and the recent-foods list) plus an
+optional export. You can request a data refresh (refresh_from_phone) but you can never trigger a write yourself.
 
-Logging: food only (water/weight tools are disabled unless ENABLE_WATER_WEIGHT is set; body weight reaches MacroFactor
-from Apple Health). Playbook ("add a jersey mike's giant turkey sub, no toppings"):
-1. search_my_foods / search_food first — the user's saved foods are the most accurate; USDA + Open Food Facts cover
-   generic and packaged foods. Chain-restaurant menus are NOT in any database here: web-search the chain's official
-   nutrition page, take the item's components (bread, meat, cheese; drop the toppings the user excluded), and sum them.
-2. get_food_nutrients turns a search hit into a scaled nutrient dictionary and a ready log_food_args object.
-3. Call log_food (one item) or log_foods_batch (a meal) with: an exact name, brand, a fitting icon, a serving
-   ({amount:1, label:"giant sub", weight:<g>} or {amount:<g>, unit:"grams"}), the full nutrients you know (at least
-   energy/protein/carbs/fat; add fiber/sugars/sodium/saturatedFat when available), notes = your breakdown + source,
-   llm_prompt = the user's original words verbatim. State the numbers you used and any assumptions in your reply.
-4. Tell the user to tap the notification; get_today (live) or get_pending_logs (landed:true) confirms it.
-Never fabricate precision: if a chain publishes ranges or you estimated, say so in notes and in your reply.
-Use get_today for "what's left today", weekly_review for check-ins, cancel_pending_log for "never mind".
+LOGGING PLAYBOOK — find the numbers in this order, and say which source you used:
+1. The user's own foods: search_my_foods (foods they have actually eaten — source 'recent' — plus any saved
+   Favorites/Custom foods). A match is the ground truth: log it with log_saved_food × servings.
+2. Chain restaurants / fast food (Jersey Mike's, Chipotle, Chick-fil-A, Starbucks, …): NOT in any database here.
+   Do a DETAILED web search for the chain's OFFICIAL nutrition source — its nutrition calculator, the nutrition PDF /
+   allergen sheet, or the item page on the chain's own site (search e.g. "jersey mike's nutrition calculator",
+   "chipotle nutrition calculator", "<chain> nutrition pdf"). Read the actual numbers for the exact size and build
+   (giant vs regular, bread type, protein, cheese) and apply the user's modifications by adding/removing the
+   published component values (e.g. drop lettuce/tomato/onion/oil/vinegar for "no toppings"). Prefer official
+   figures over third-party calculator sites, blogs or your own estimate; use third-party aggregators only to
+   locate the official source or when the chain publishes nothing, and say so. Put the source URL and the
+   component math in notes.
+3. Generic and packaged foods: search_food (USDA FoodData Central + Open Food Facts) → get_food_nutrients for a
+   scaled nutrient dictionary and a ready log_food_args. USDA "Survey (FNDDS)" has generic restaurant-style dishes
+   ("Turkey sandwich or sub, restaurant") as a last-resort stand-in for chains with no published data.
+4. Only if nothing above applies, estimate from components — and label it an estimate in notes and in your reply.
 
-Data freshness: the user's read-only "MF Nightly" Shortcut (nightly automation, app open/close, or refresh_from_phone)
-posts today's totals, micros and targets plus the recent-foods list, which also maintains the saved-foods library.
-Writes go through the separate "MF Sync" Shortcut, which only runs when the user taps the logging notification. A
-MacroFactor export is OPTIONAL. Only two things
-need an export: MacroFactor's expenditure (TDEE) and its trend weight. If today looks stale, call refresh_from_phone
-and re-query after the user taps the notification. search_my_foods / log_saved_food cover foods the user has actually
-eaten (source 'recent'). The user syncs MacroFactor to Apple Health, so if your client has an Apple Health tool, raw
-body weight and body measurements live there. Prefer this server for totals, targets, foods and all logging.`;
+Then call log_food (one item) or log_foods_batch (a meal) with: an exact name, brand, a fitting icon, a serving
+({amount:1, label:"giant sub", weight:<g>} or {amount:<g>, unit:"grams"}), every nutrient you have (at least
+energy/protein/carbs/fat; add fiber/sugars/sodium/saturatedFat when published), notes = source + breakdown,
+llm_prompt = the user's original words verbatim. Report the numbers and assumptions in your reply, then tell the
+user to tap the notification; get_today (live) or get_pending_logs (landed:true) confirms it.
+Never fabricate precision. cancel_pending_log for "never mind".
+
+DATA FRESHNESS: the read-only MF Nightly Shortcut runs at 11:50 PM, when the user closes MacroFactor, and whenever
+you call refresh_from_phone (the user taps a "MacroFactor Refresh" notification). It posts today's totals, micros
+and targets and the recent-foods list, which also maintains the saved-foods library. A MacroFactor export is
+OPTIONAL: only MacroFactor's expenditure (TDEE) and its trend weight come from it — if data_status shows none, say
+those are unavailable rather than estimating. The user syncs MacroFactor to Apple Health, so raw body weight and
+body measurements live in an Apple Health tool if your client has one. Water/weight logging tools are disabled
+unless the server enables them. Use get_today for "what's left today" and weekly_review for check-ins.`;
 
 // Recompute all-time PRs from workout_sets, write any new ones to pr_alerts, and fire the
 // "New PR" Pushcut push. Runs in a background context (ctx.waitUntil after /upload-export and
@@ -793,8 +803,9 @@ export class MyMCP extends McpAgent<Env> {
           "from the export — most accurate, log with log_saved_food), (2) USDA FoodData Central (whole foods, generic dishes, " +
           "US packaged foods) and (3) Open Food Facts (packaged products worldwide). Rows carry per-100 g and per-serving " +
           "macros plus an id for get_food_nutrients. NOT covered: chain-restaurant menu items (Jersey Mike's, Chipotle, …) — " +
-          "for those, web-search the chain's official nutrition page, build the item from its components, and call log_food " +
-          "with explicit nutrients. Search short generic terms ('turkey breast deli', 'provolone'), not sentences.",
+          "for those, web-search the chain's OFFICIAL nutrition calculator / nutrition PDF, read the exact size and build, " +
+          "apply the user's modifications from the published component values, and call log_food with explicit nutrients " +
+          "(source URL in notes). Search short generic terms here ('turkey breast deli', 'provolone'), not sentences.",
         inputSchema: {
           query: z.string().min(1).describe("Food name / keywords"),
           sources: z.array(z.enum(["saved", "usda", "off"])).optional().describe("Default: all three"),

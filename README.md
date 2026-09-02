@@ -38,19 +38,22 @@ so this uses only **official** mechanisms:
 
 *"add jersey mike giant turkey sub no toppings"*
 
-1. The agent calls `search_food` (your saved foods, USDA, Open Food Facts). Chain-restaurant menus
-   aren't in any of those, so the server tells it to web-search the chain's official nutrition page.
-2. It takes the item's components (bread, turkey, provolone), drops the toppings you excluded, sums
-   the macros, and calls `log_food` with an exact name, brand, icon, serving (`{amount:1, label:"giant
-   sub", weight:…}`), the nutrients, `notes` (its breakdown + source) and `llm_prompt` (your words).
+1. The agent checks your own foods first (`search_my_foods` — everything you've eaten, from the phone
+   feed). No match, so it web-searches Jersey Mike's **official** nutrition calculator, reads the Giant
+   #7 build (bread, turkey, provolone) and drops the Mike's Way toppings using the published component
+   values. Official figures beat third-party calculators and guesses; it says which it used.
+2. It calls `log_food` with an exact name, brand, icon, serving (`{amount:1, label:"giant sub", weight:…}`),
+   the nutrients, `notes` (source URL + breakdown) and `llm_prompt` (your words). Generic and packaged
+   foods go through `search_food` / `get_food_nutrients` (USDA + Open Food Facts) instead.
 3. The Worker validates the payload against MacroFactor's official schema, queues it, and pings your
    phone. You tap → MF Sync logs it → MacroFactor's returned today summary lands on the server.
 4. `get_today` now shows the entry in your live totals; `get_pending_logs` shows `landed:true`.
 
-The server also ships MCP *instructions* with this playbook, so any client that supports them
-(Claude, ChatGPT, Codex) follows it without extra prompting.
+The server ships MCP *instructions* with this playbook, so any client that supports them (Claude, ChatGPT,
+Codex) follows it without extra prompting. Reads and writes are separate on purpose: the agent can request a
+refresh (`refresh_from_phone` → "MacroFactor Refresh" notification → MF Nightly) but never a write.
 
-## Tools (44)
+## Tools (42, plus 2 optional)
 
 **Food search**
 
@@ -128,14 +131,14 @@ Note the URL it prints, e.g. `https://macrofactor-mcp.<you>.workers.dev`. `GET /
 ### 5. iPhone Shortcut
 Follow **[ios-setup.md](./ios-setup.md)** — "MF Sync" (writes) and "MF Nightly" (reads), each with its own Pushcut notification.
 
-### 6. Load your history
-MacroFactor → **More → Data Management → Data Export**. Either share the files to the "Update MF"
-Shortcut (ios-setup.md) or, from a computer:
+### 6. (Optional) Load an export
+Only MacroFactor's expenditure (TDEE), trend weight and workout data need an export; everything else comes
+from the MF Nightly Shortcut. If you want those: MacroFactor → **More → Data Management → Data Export**,
+then share the files to the "Update MF" Shortcut (ios-setup.md) or, from a computer:
 ```bash
 cp ingest.config.example.json ingest.config.json   # fill in workerUrl + ingestSecret
 npm run ingest -- path/to/workbook.xlsx path/to/foodlog.csv path/to/workoutlog.csv
 ```
-Logging works without any export; history/analytics tools need it.
 
 ### 7. Connect an agent
 
@@ -145,7 +148,7 @@ The connector URL is `https://macrofactor-mcp.<you>.workers.dev/mcp/<MCP_TOKEN>`
 - **Claude Code:** `claude mcp add --transport http macrofactor "https://macrofactor-mcp.<you>.workers.dev/mcp/<MCP_TOKEN>"`
 - **Claude Desktop:** Settings → Connectors → *Add custom connector* (same URL).
 - **ChatGPT:** Settings → Connectors → *Create* (needs Developer Mode on Pro/Team/Enterprise) → URL, Authentication **None**.
-  The `search` / `fetch` tools satisfy ChatGPT's connector requirements; in Developer Mode all 43 tools are available.
+  The `search` / `fetch` tools satisfy ChatGPT's connector requirements; in Developer Mode all tools are available.
 - **OpenAI API (Responses):** `tools: [{ type: "mcp", server_label: "macrofactor", server_url: "https://…/mcp/<MCP_TOKEN>", require_approval: "never" }]`
 - **Codex CLI:** `codex mcp add macrofactor --url "https://…/mcp/<MCP_TOKEN>"`
 - **Cursor / Windsurf / anything with Streamable HTTP MCP:** same URL.
@@ -191,12 +194,13 @@ targets, foods and all logging.
 ## Known limits
 
 - Entries land at **sync time** — MacroFactor's actions have no date field. Pass `intended_time`
-  to any food-write tool and the server matches it against the Food Log CSV on the next import.
-- The read-only MF Nightly Shortcut (11:50 PM, app close, or `refresh_from_phone`) posts today's totals,
-  micros, targets and the recent-foods list, so the food log and the saved-foods library come from the phone. Only MacroFactor's expenditure (TDEE) and trend weight
-  (and workouts) still need an export — the export is optional otherwise.
-- USDA and Open Food Facts don't have chain-restaurant menus; the agent uses web search for those and
-  logs explicit numbers (it is told to say so in `notes`).
+  to any food-write tool; the server matches it against the food log on the next feed or export.
+- The food log from the phone feed is per distinct food (MacroFactor's "recent foods" list): a food eaten
+  twice in a day shows once. Day totals come from the today summary, so they are exact.
+- Only MacroFactor's expenditure (TDEE) and trend weight need an export; raw weight and measurements are
+  in Apple Health. Water/weight logging is off unless `ENABLE_WATER_WEIGHT` is "true".
+- USDA and Open Food Facts don't have chain-restaurant menus; the agent is instructed to use the chain's
+  official nutrition calculator/PDF via web search and to cite it in `notes`.
 - Weights are stored in kg (MacroFactor exports normalise to kg even if the app shows pounds).
 
 ## Make it yours

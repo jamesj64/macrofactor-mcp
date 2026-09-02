@@ -47,7 +47,7 @@ const TOOL_NAMES = new Set([
   "detect_stall", "micro_gap_analysis", "get_training_day_nutrition", "get_pr_alerts",
   "get_pending_logs", "cancel_pending_log", "log_food", "log_saved_food", "log_recipe",
   "relog_meal", "log_foods_batch", "log_water", "log_weight",
-  "search_food", "get_food_nutrients", "lookup_barcode", "search", "fetch",
+  "search_food", "get_food_nutrients", "lookup_barcode", "search", "fetch", "refresh_from_phone",
 ]);
 
 function parseClaims(markdown) {

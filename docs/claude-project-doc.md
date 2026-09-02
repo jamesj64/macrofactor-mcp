@@ -1,34 +1,36 @@
 # MacroFactor MCP — Claude Project Reference
 
-**43 tools as of 2026-09-02 (jamesj64 fork). Paste this file into the Claude project you use with this connector as context.** The server also ships MCP `instructions` with the logging playbook.
+**42 tools as of 2026-09-02 (jamesj64 fork; +2 optional water/weight tools). Paste this file into the Claude project you use with this connector as context.** The server also ships MCP `instructions` with the logging playbook.
 
 ---
 
 ## 1. What the server is
 
-A Cloudflare Worker backed by a D1 SQLite database. It ingests MacroFactor data via two independent paths and exposes 38 MCP tools:
+A Cloudflare Worker backed by a D1 SQLite database, exposing 42 MCP tools. Data arrives three ways:
 
-**Path A — Finalized export:** Upload the MacroFactor `.xlsx` export to `POST /upload-export`. The importer parses every sheet (Nutrition / Food Log / Micronutrients / Workout Sets / Muscle Volume / Exercise Metrics / Weight / Body Metrics / Program / Targets / Weight Goals / Food Library) into D1. All historical read tools draw from this data.
+**Path A — phone feed (primary):** the read-only **MF Nightly** Shortcut runs at 11:50 PM, when the user closes MacroFactor, and on `refresh_from_phone`. It posts (1) MacroFactor's *Macros Remaining* Today Summary to `POST /today` → `today_summary` (live totals, every nutrient), `days` + `micronutrients` rows for the date (tagged live), and derived calorie/macro targets (`nutrition_targets`, `expenditure_mode='live-derived'`); (2) the *Find Recent Food* list to `POST /foods-seen` → today's `food_log` rows (source `shortcut`, one per food at Time Last Consumed) and the saved-foods library (`food_library` source `recent`, macros of the portion last logged).
 
-**Path B — Live /today feed:** A MacroFactor "Today-Summary" shortcut on the user's phone POSTs current macros to `POST /today` several times per day, independent of exports. `get_daily_nutrition` and `get_day` overlay this live feed onto the exported data for the current calendar date — live wins for macros (calories/protein/carbs/fat); the export still supplies expenditure, weight, and steps which the live feed doesn't carry. Tagged `live:true`. Earlier dates are gap-filled (not overwritten) by the live feed.
+**Path B — sync ack:** every **MF Sync** run (the write Shortcut) posts MacroFactor's returned Today Summary to `POST /sync-ack`, which also refreshes today's rows.
 
-**Write queues:** `log_food`, `log_saved_food`, `log_recipe`, `relog_meal`, `log_foods_batch` write MacroFactorFood rows to `pending_food`; `log_water` / `log_weight` write to `pending_water` / `pending_weight`. One Pushcut notification fires; the user taps it (or says "Hey Siri, MF Sync") → the **MF Sync** Shortcut calls `GET /pending-all`, which claims every queued row and returns `{claim, count, foods[], water[], weight[]}`; the Shortcut loops them through MacroFactor's "Log by JSON" / "Log Water" / "Log Weight" actions and finally `POST /sync-ack?claim=` with MacroFactor's returned Today Summary. Food lands in MacroFactor at sync-time, not queue-time.
+**Path C — export (optional):** `POST /upload-export` parses the MacroFactor `.xlsx` / CSV exports. Only needed for expenditure (TDEE), trend weight, body metrics and workouts. Export rows are authoritative; `recent` library rows survive uploads.
 
-**Food search:** `search_food` / `get_food_nutrients` / `lookup_barcode` query USDA FoodData Central and Open Food Facts live (plus `food_library` from the export). `search` / `fetch` are ChatGPT-connector-shaped wrappers.
+**Write queue:** `log_food`, `log_saved_food`, `log_recipe`, `relog_meal`, `log_foods_batch` write validated MacroFactorFood rows to `pending_food` (`log_water` / `log_weight` exist only when `ENABLE_WATER_WEIGHT` is "true"). One Pushcut notification ("MacroFactor") fires; the user taps it → **MF Sync** calls `GET /pending-all`, loops the foods through MacroFactor's "Log by JSON", and finally `POST /sync-ack` (claim header) with the returned summary. Food lands in MacroFactor at sync-time, not queue-time. The agent cannot run MF Sync; it can only queue.
+
+**Food search:** `search_food` / `get_food_nutrients` / `lookup_barcode` query USDA FoodData Central and Open Food Facts live (plus `food_library`). `search` / `fetch` are ChatGPT-connector-shaped wrappers. Chain restaurants: the instructions tell the agent to web-search the chain's official nutrition calculator/PDF and cite it.
 
 ---
 
 ## 2. Write-confirmation loop
 
 ```
-log_food / log_foods_batch / log_recipe / relog_meal / log_saved_food / log_water / log_weight
-  ↓ validated against the official MacroFactorFood schema, enqueued, ONE Pushcut notification
-User taps notification (or Siri / app-closed automation) → "MF Sync" Shortcut
+log_food / log_foods_batch / log_recipe / relog_meal / log_saved_food
+  ↓ validated against the official MacroFactorFood schema, enqueued, Pushcut "MacroFactor" notification
+User taps notification (or "Hey Siri, MF Sync") → "MF Sync" Shortcut
   ↓ GET /pending-all  → claims all rows under one `claim` stamp (re-served after 10 min if unacked)
-  ↓ Log by JSON ×N, Log Water ×N, Log Weight ×N
-  ↓ POST /sync-ack?claim=<stamp>  body = MacroFactor's Today Summary
+  ↓ Log by JSON ×N  (Log Water / Log Weight only when ENABLE_WATER_WEIGHT is on)
+  ↓ POST /sync-ack  (header claim=<stamp>)  body = MacroFactor's returned Today Summary
     → deletes the claimed rows, marks food_dispatch_log.landed_at_ms
-    → upserts today_summary (consumed + remaining-vs-goal for every nutrient) → get_today is live
+    → upserts today_summary + day rows + derived targets → get_today is live
 ```
 
 **get_pending_logs** shows every queue (with `claimed:true` once the phone has fetched a row) plus `recent_dispatches` (last 24 h of foods the phone has pulled):
@@ -664,20 +666,20 @@ Aggregates all food_log items for `date` (optionally filtered to `[start_hour, e
 
 ---
 
-#### `log_water`
+#### `log_water` *(only when `ENABLE_WATER_WEIGHT` = "true")*
 Log water intake.
 
 | Param | Type | Required |
 |---|---|---|
 | ml | number (positive) | yes |
 
-Convert before calling: 1 US fl oz ≈ 30 mL, 1 cup ≈ 240 mL, 1 L = 1000 mL. Uses `PUSHCUT_WATER_WEBHOOK_URL` and "MF Log Water" Shortcut. Rounded to nearest mL.
+Convert before calling: 1 US fl oz ≈ 30 mL, 1 cup ≈ 240 mL, 1 L = 1000 mL. Queued to `pending_water`, logged by MF Sync's Log Water loop. Rounded to nearest mL.
 
 **Returns:** Status message with mL amount.
 
 ---
 
-#### `log_weight`
+#### `log_weight` *(only when `ENABLE_WATER_WEIGHT` = "true"; weight normally reaches MacroFactor via Apple Health)*
 Log a body weight reading.
 
 | Param | Type | Required |
@@ -685,13 +687,24 @@ Log a body weight reading.
 | kg | number | yes |
 | unit | "kg"\|"lbs" | no (default "kg") |
 
-Pass `unit:"lbs"` for automatic server-side conversion (÷ 2.20462). Uses `PUSHCUT_WEIGHT_WEBHOOK_URL` and "MF Log Weight" Shortcut.
+Pass `unit:"lbs"` for automatic server-side conversion (÷ 2.20462). Queued to `pending_weight`, logged by MF Sync's Log Weight loop.
 
 **Returns:** Status message with kg value (after conversion).
 
 ---
 
 ### QUEUE MANAGEMENT
+
+---
+
+#### `refresh_from_phone`
+Ping the phone's read-only "MacroFactor Refresh" notification (`PUSHCUT_REFRESH_WEBHOOK_URL`). Tapping it runs **MF Nightly**: today's totals/targets and the recent-foods list are re-posted. Never logs anything.
+
+No params.
+
+**Returns:** `{status: "sent"|"push_failed"|"not_configured", message}`.
+
+**When to use:** `data_status` / `get_today` look stale and current numbers matter. Re-query after the user confirms the tap.
 
 ---
 
@@ -802,4 +815,5 @@ Response shapes for `weekly_summary`, `get_adherence`, `get_prs`, `data_status`,
 - **Live today from every sync:** `/sync-ack` stores the Today Summary MacroFactor returns from Log by JSON.
 - **Config:** `USER_TZ` and `MF_SOURCE` are `wrangler.jsonc` vars; `USDA_API_KEY` secret. `PUSHCUT_WATER/WEIGHT/BATCH_WEBHOOK_URL` removed.
 - **Apple Health hint:** the MCP instructions, `data_status` (`alternative_sources`), `get_daily_nutrition` and `get_weight_history` tell the agent that MacroFactor also syncs daily energy/macros and body weight to Apple Health, so an Apple Health tool in the client can fill gaps when export data is stale.
+- **Phone feed (2026-09-02, later the same day):** `POST /today` accepts a Today Summary body (Macros Remaining) or nutrient query params and gap-fills `days`, `micronutrients` and derived `nutrition_targets`; `POST /foods-seen` stores the Find Recent Food list (pipe-delimited lines) as today's `food_log` rows and the `recent` saved-foods library. Read (MF Nightly) and write (MF Sync) Shortcuts are separate, each with its own Pushcut notification; `refresh_from_phone` fires the read one. Water/weight tools gated behind `ENABLE_WATER_WEIGHT`. Export is optional (TDEE / trend weight / workouts only).
 - **Tests:** `npm test` validates payloads against MacroFactor's official sample JSON; `scripts/local-e2e.mjs` exercises the whole write path against `npm run dev` without a phone.

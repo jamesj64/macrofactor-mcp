@@ -25,13 +25,13 @@ console.log(`tools (${tools.length}):`, tools.map((t) => t.name).join(", "));
 // tool_annotations: readOnlyHint on a read tool, destructiveHint on the write tools
 {
   const readAnnot = tools.find((t) => t.name === "get_daily_nutrition")?.annotations;
-  const logWater = tools.find((t) => t.name === "log_water")?.annotations;
+  const logBatch = tools.find((t) => t.name === "log_foods_batch")?.annotations;
   const logFood = tools.find((t) => t.name === "log_food")?.annotations;
   const annotOk =
     readAnnot?.readOnlyHint === true &&
-    logWater?.readOnlyHint === false && logWater?.destructiveHint === true &&
+    logBatch?.readOnlyHint === false && logBatch?.destructiveHint === true &&
     logFood?.readOnlyHint === false && logFood?.destructiveHint === true;
-  console.log("tool_annotations:", annotOk ? "PASS" : `FAIL (read=${JSON.stringify(readAnnot)} water=${JSON.stringify(logWater)})`);
+  console.log("tool_annotations:", annotOk ? "PASS" : `FAIL (read=${JSON.stringify(readAnnot)} batch=${JSON.stringify(logBatch)})`);
   if (!annotOk) process.exitCode = 1;
 }
 
@@ -146,8 +146,8 @@ if (secret) {
 // phone. We assert the tools exist, that an unresolvable saved-food returns not_found WITHOUT
 // queuing, and that the new /pending-water endpoint is wired + authed.
 const toolNames = tools.map((t) => t.name);
-const haveLogTools = ["log_saved_food", "log_water"].every((t) => toolNames.includes(t));
-console.log("\nlog_saved_food / log_water registered:", haveLogTools ? "PASS" : "FAIL");
+const haveLogTools = ["log_saved_food", "refresh_from_phone"].every((t) => toolNames.includes(t));
+console.log("\nlog_saved_food / refresh_from_phone registered:", haveLogTools ? "PASS" : "FAIL");
 if (!haveLogTools) process.exitCode = 1;
 
 // Body metrics + planned program (read-only).
@@ -364,7 +364,7 @@ if (secret) {
 
 // New write-tool registration (no functional calls — they'd queue + fire a push)
 {
-  const need = ["log_weight", "log_recipe", "relog_meal", "log_foods_batch", "cancel_pending_log"];
+  const need = ["log_recipe", "relog_meal", "log_foods_batch", "cancel_pending_log", "search_food", "get_food_nutrients"];
   const ok = need.every((t) => toolNames.includes(t));
   console.log("\nnew write tools registered:", ok ? "PASS" : `FAIL (missing ${need.filter((t) => !toolNames.includes(t)).join(", ")})`);
   if (!ok) process.exitCode = 1;
