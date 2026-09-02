@@ -7,7 +7,7 @@ import {
   DEFAULT_SOURCE, buildFoodPayload, buildRecipePayload, foodItemShape, intendedTimeField, macroSummary,
   recipeChildShape, validateFoodPayload, type LogFoodArgs,
 } from "./nutrients";
-import { type MacroFactorFood, type Nutrients } from "./mf-schema";
+import { isNutrientKey, type MacroFactorFood, type Nutrients } from "./mf-schema";
 import {
   getFoodDetail, getOFFProduct, headline, nutrientsFor, resolveAmount, searchOFF, searchUSDA,
   type FoodDetail, type FoodHit,
@@ -1549,12 +1549,14 @@ async function handleToday(request: Request, env: Env): Promise<Response> {
     const n = parseFloat(v.replace(/[^0-9.\-]/g, "")); // tolerate "2876 Cal", "1,850", etc.
     return Number.isNaN(n) ? null : n;
   };
+  // Any MacroFactor nutrient key works as a query param (energy, protein, …, vitaminD), plus the
+  // aliases calories→energy, sugar→sugars, sodium_mg→sodium, saturated_fat→saturatedFat.
   const qConsumed: Record<string, number> = {};
-  for (const [param, key] of [
-    ["energy", "energy"], ["calories", "energy"], ["protein", "protein"],
-    ["carbs", "carbs"], ["fat", "fat"], ["fiber", "fiber"], ["water", "water"],
-  ] as const) {
-    const n = qnum(q.get(param));
+  const ALIAS: Record<string, string> = { calories: "energy", sugar: "sugars", sodium_mg: "sodium", saturated_fat: "saturatedFat", caffeine_mg: "caffeine", alcohol_g: "alcohol" };
+  for (const [param, raw] of q.entries()) {
+    const key = ALIAS[param] ?? param;
+    if (!isNutrientKey(key)) continue;
+    const n = qnum(raw);
     if (n != null) qConsumed[key] = n;
   }
 
@@ -1599,12 +1601,61 @@ async function handleToday(request: Request, env: Env): Promise<Response> {
 
   const ex = db.extractTodaySummary(payload);
   await db.upsertToday(env.DB, date, ex, raw, Date.now(), url.searchParams.get("source") || "today-summary-shortcut");
+  const snapshot = await db.recordDaySnapshot(env.DB, date, ex.consumed);
   return json({
     ok: true,
     date,
     consumed: { calories: ex.calories, protein: ex.protein, carbs: ex.carbs, fat: ex.fat },
     had_remaining: !!ex.remaining,
+    snapshot,
     ...(ack != null ? { ack } : {}),
+  });
+}
+
+// POST /foods-seen?token=<INGEST_SECRET>[&date=YYYY-MM-DD]
+// Nightly "Find Recent Food" feed: the foods MacroFactor lists as consumed on `date` (default:
+// today in USER_TZ). Body: whatever the Shortcut can produce — a JSON array of dictionaries,
+// {items:[...]}, or plain text with one food name per line. Replaces that date's shortcut-sourced
+// food_log rows; echoes how the body was interpreted so a mis-wired Shortcut is easy to fix.
+async function handleFoodsSeen(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") return json({ error: "POST only" }, 405);
+  const url = new URL(request.url);
+  const token = request.headers.get("x-ingest-secret") || url.searchParams.get("token");
+  if (!env.INGEST_SECRET || token !== env.INGEST_SECRET) return json({ error: "unauthorized" }, 401);
+  const date = validIsoDate(url.searchParams.get("date")) || db.todayLocal();
+
+  let raw = "";
+  let body: unknown = null;
+  try {
+    const ctype = request.headers.get("content-type") || "";
+    if (ctype.includes("multipart/form-data")) {
+      const form = await request.formData();
+      for (const v of form.values()) {
+        raw = typeof v === "string" ? v : await (v as File).text();
+        break;
+      }
+    } else {
+      raw = await request.text();
+    }
+    body = JSON.parse(raw);
+    if (typeof body === "string") { try { body = JSON.parse(body); } catch { /* keep the string */ } }
+  } catch {
+    body = raw; // not JSON — treat as text lines
+  }
+  if (raw.trim() === "") return json({ ok: true, date, stored: 0, note: "empty body — nothing to store" });
+
+  const parsed = db.parseFoodsSeen(body);
+  if (url.searchParams.get("dry_run") === "1") {
+    return json({ ok: true, date, dry_run: true, shape: parsed.shape, rows: parsed.rows, unrecognized_keys: parsed.unrecognized, received_start: raw.slice(0, 300) });
+  }
+  const stored = await db.replaceFoodsSeen(env.DB, date, parsed.rows);
+  return json({
+    ok: true,
+    date,
+    stored,
+    shape: parsed.shape,
+    ...(parsed.unrecognized.length ? { unrecognized_keys: parsed.unrecognized } : {}),
+    sample: parsed.rows.slice(0, 3),
   });
 }
 
@@ -1691,7 +1742,8 @@ async function handleSyncAck(request: Request, env: Env): Promise<Response> {
     const date = validIsoDate(url.searchParams.get("date")) || db.todayLocal();
     const ex = db.extractTodaySummary(payload);
     await db.upsertToday(env.DB, date, ex, raw, Date.now(), "mf-sync");
-    today = { date, consumed: { calories: ex.calories, protein: ex.protein, carbs: ex.carbs, fat: ex.fat }, had_remaining: !!ex.remaining };
+    const snapshot = await db.recordDaySnapshot(env.DB, date, ex.consumed);
+    today = { date, consumed: { calories: ex.calories, protein: ex.protein, carbs: ex.carbs, fat: ex.fat }, had_remaining: !!ex.remaining, snapshot };
   }
   return json({
     ok: true,
@@ -1759,6 +1811,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (url.pathname === "/today") return handleToday(request, env);
   if (url.pathname === "/pending-all") return handlePendingAll(request, env);
   if (url.pathname === "/sync-ack") return handleSyncAck(request, env);
+  if (url.pathname === "/foods-seen") return handleFoodsSeen(request, env);
   if (url.pathname === "/pending") return handlePending(request, env);
   if (url.pathname === "/pending-water") return handlePendingWater(request, env);
   if (url.pathname === "/pending-weight") return handlePendingWeight(request, env);
@@ -1788,7 +1841,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
 
   return new Response(
     "MacroFactor MCP server.\nEndpoints: /mcp (connector), /upload-export (export refresh), " +
-      "/pending-all + /sync-ack (MF Sync Shortcut), /today (live today feed), " +
+      "/pending-all + /sync-ack (MF Sync Shortcut), /today (live totals), /foods-seen (nightly foods), " +
       "/pending, /pending-water, /pending-weight, /pending-batch + /ack-batch (legacy per-type queues), " +
       "/cancel-pending (clear queues), /health\n",
     { status: 404 },

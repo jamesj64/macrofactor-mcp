@@ -103,6 +103,40 @@ Repeat for each export you want refreshed. From a computer, `npm run ingest -- f
 
 ---
 
+## Shortcut 3 — "MF Nightly" (optional: history without exports)
+
+Runs itself every night (Automation → Time of Day → 11:50 PM → Run Immediately → MF Nightly) and
+pushes two things so the export is only needed occasionally:
+
+**A. Today's totals** — MacroFactor's **Get Nutrition State** action returns one number per call, so add
+one per nutrient you care about (Calculation **Consumed**): Calories, Protein, Carbs, Fat, Fiber, Sugar,
+Sodium, Saturated Fat, … Then **Get Contents of URL**, POST, header `x-ingest-secret`, and put the values
+into the URL as query params (type the URL, then insert each variable after its `=`):
+
+```
+https://macrofactor-mcp.<your-subdomain>.workers.dev/today?energy=[Calories]&protein=[Protein]&carbs=[Carbs]&fat=[Fat]&fiber=[Fiber]&sugars=[Sugar]&sodium=[Sodium]&saturatedFat=[SatFat]
+```
+
+Any MacroFactor nutrient key works as a param (`potassium`, `vitaminD`, `water`, …). The server fills
+the `days` and `micronutrients` tables for that date (tagged live; a later export replaces them).
+
+**B. Today's foods** — **Find Recent Food** where *Time Last Consumed is after* **Start of Today** and
+*before* **Now** (sort by Time Last Consumed). Then post the list to:
+
+```
+https://macrofactor-mcp.<your-subdomain>.workers.dev/foods-seen?token=<INGEST_SECRET>
+```
+
+Method POST, Request Body **File** ← the Find Recent Food result (or a **Dictionary**/list you build from
+its properties: `name`, `Time Last Consumed`, `calories`, `protein`, `carbs`, `fat`). The endpoint accepts a
+JSON array, `{items:[…]}`, or plain text with one name per line, and echoes how it interpreted the body
+(`shape`, `sample`, `unrecognized_keys`). Add `&dry_run=1` while wiring it up to see the parse without
+storing. Note MacroFactor's "Recent Food" is a distinct-food list (a food eaten twice in the window
+appears once), so treat this feed as "what I ate", not an exact item count.
+
+**Still export-only:** MacroFactor's expenditure (TDEE) and trend weight, your saved-foods library,
+workouts and training aggregates. A monthly export covers those.
+
 ## Optional — "MF Today" (refresh today without logging)
 
 MF Sync already refreshes today's totals every time it logs something. If you also want a manual

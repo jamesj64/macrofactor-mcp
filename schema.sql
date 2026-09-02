@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS days (
   fat_percent  REAL,               -- body fat % (if logged)
   trend_weight REAL,               -- smoothed trend weight (kg)
   steps        REAL,
-  alcohol_g    REAL
+  alcohol_g    REAL,
+  source       TEXT               -- NULL = from an export; 'live' = gap-filled from a phone snapshot
 );
 
 CREATE TABLE IF NOT EXISTS micronutrients (
@@ -51,7 +52,8 @@ CREATE TABLE IF NOT EXISTS food_log (
   calories         REAL,
   protein          REAL,
   carbs            REAL,
-  fat              REAL
+  fat              REAL,
+  source           TEXT             -- NULL = Food Log CSV export; 'shortcut' = nightly Find Recent Food feed
 );
 CREATE INDEX IF NOT EXISTS idx_food_log_date ON food_log(date);
 

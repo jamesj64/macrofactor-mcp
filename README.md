@@ -166,7 +166,8 @@ npm test                         # schema tests against MacroFactor's official s
 | `GET /pending-all?token=` | MF Sync | claim everything queued: `{claim, count, foods[], water[], weight[]}` |
 | `POST /sync-ack?token=&claim=` | MF Sync | delete the claimed rows; body = MacroFactor's Today Summary → live today |
 | `POST /upload-export` | Update MF / `npm run ingest` | parse an export into D1 |
-| `POST /today` | optional refresh Shortcut | live today totals |
+| `POST /today` | MF Nightly / refresh Shortcut | live totals for a date; any MacroFactor nutrient key as a query param; gap-fills `days` + `micronutrients` |
+| `POST /foods-seen` | MF Nightly | the day's foods from MacroFactor's Find Recent Food action → `food_log` (tagged `shortcut`) |
 | `GET /health` | you | D1 check |
 | `/pending`, `/pending-water`, `/pending-weight`, `/pending-batch`, `/ack-batch`, `/cancel-pending` | legacy Shortcuts | per‑type queues from upstream |
 
@@ -189,7 +190,8 @@ saved foods and all logging.
 
 - Entries land at **sync time** — MacroFactor's actions have no date field. Pass `intended_time`
   to any food-write tool and the server matches it against the Food Log CSV on the next import.
-- History is as fresh as your last export; **today** is live after every sync.
+- History is as fresh as your last export, or your nightly Shortcut (totals, micros, foods); **today** is
+  live after every sync. Expenditure/TDEE, trend weight, saved foods and workouts remain export-only.
 - USDA and Open Food Facts don't have chain-restaurant menus; the agent uses web search for those and
   logs explicit numbers (it is told to say so in `notes`).
 - Weights are stored in kg (MacroFactor exports normalise to kg even if the app shows pounds).
