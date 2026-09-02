@@ -1,7 +1,7 @@
-# iPhone setup — one Shortcut logs everything
+# iPhone setup — one Shortcut does everything
 
-Two Shortcuts (one required, one optional) and one Pushcut notification. Both Shortcuts call your
-Worker with your `INGEST_SECRET` (replace `<INGEST_SECRET>` below). Your server base URL:
+One required Shortcut (MF Sync), one optional (Update MF, for exports) and one Pushcut notification.
+Both Shortcuts call your Worker with your `INGEST_SECRET` (replace `<INGEST_SECRET>` below). Your server base URL:
 
 ```
 https://macrofactor-mcp.<your-subdomain>.workers.dev
@@ -12,79 +12,75 @@ agent never touches the app directly — it queues entries on your Worker and **
 
 ---
 
-## Shortcut 1 — "MF Sync" (required: food, water and weight logging)
+## Shortcut 1 — "MF Sync" (the only required Shortcut)
+
+One Shortcut does everything, in this order: **log what the agent queued → report today's totals →
+report the recent-foods list.** Every trigger (notification tap, app open/close, nightly automation, Siri,
+the agent's `refresh_from_phone`) runs the same thing, so the server is always current.
 
 ```
-agent → log_food / log_foods_batch / log_water / log_weight
-      → Worker queue + Pushcut push → you tap (or "Hey Siri, sync MacroFactor")
-      → MF Sync: GET /pending-all → Log by JSON ×N, Log Water ×N, Log Weight ×N → POST /sync-ack
+agent → log_food / log_foods_batch → Worker queue + Pushcut push → you tap (or automation / Siri)
+      → MF Sync:  GET /pending-all → Log by JSON ×N
+                  Macros Remaining → POST /sync-ack   (ack + today's totals, micros, targets)
+                  Find Recent Food → POST /foods-seen (food log + saved-foods library)
 ```
 
-`/pending-all` returns one dictionary: `{ claim, count, foods: [...], water: [...], weight: [...] }`.
-Every item the agent queued since the last sync is logged in one run, and the last MacroFactor
-result (a Today Summary with consumed + remaining-vs-goal for every nutrient) is posted back so
-`get_today` is live. Nothing is deleted from the queue until the ack arrives; if the Shortcut
-crashes, the items are re-served after 10 minutes.
+**Build it (Shortcuts app):** name it exactly `MF Sync`.
 
-**Build it (Shortcuts app):**
+*Part 1 — log the queue*
 
-1. New Shortcut, name **MF Sync**. (Siri phrase = the name: "Hey Siri, MF Sync".)
-2. **Get Contents of URL** — type the URL literally (don't build it from a variable):
+1. **Get Contents of URL** — type the URL literally, method **GET**:
    `https://macrofactor-mcp.<your-subdomain>.workers.dev/pending-all?token=<INGEST_SECRET>`
-   Method **GET**.
-3. **Get Dictionary from Input** ← **Contents of URL**.
-4. **Get Dictionary Value** → key `claim` (call the result *Claim* by leaving its name alone; you'll insert it as a variable later).
-5. **Get Dictionary Value** → key `foods` in the step-3 dictionary.
-6. **Repeat with Each** ← the `foods` value:
-   - **Log by JSON** (MacroFactor action) ← **Repeat Item**.
-7. **End Repeat**.
-8. **Get Dictionary Value** → key `water` in the step-3 dictionary.
-9. **Repeat with Each** ← the `water` value:
-   - **Log Water** (MacroFactor action) ← **Repeat Item**, unit **mL** (the server always sends millilitres).
-10. **End Repeat**.
-11. **Get Dictionary Value** → key `weight` in the step-3 dictionary.
-12. **Repeat with Each** ← the `weight` value:
-    - **Log Weight** (MacroFactor action) ← **Repeat Item**. The server sends **kg**. If the action
-      wants your display unit (lbs), insert **Calculate** (Repeat Item × 2.20462) first.
-13. **End Repeat**.
-14. **Get Contents of URL**:
-    - URL: `https://macrofactor-mcp.<your-subdomain>.workers.dev/sync-ack?token=<INGEST_SECRET>`
-    - Method **POST**
-    - Headers: add `claim` = the **Dictionary Value** from step 4 (tap the value field → Select Variable).
-      (Inserting it into the URL as `&claim=…` works too; the header is just easier to wire.)
-    - Request Body: tap **JSON** on the Request Body row and switch it to **File**, then set the file to the
-      **Log by JSON** result from step 6 (the last one wins). Staying in JSON mode also works: add one
-      **Dictionary** field with key `summary` = the Log by JSON result. If you skip the body the ack still
-      clears the queue; you just won't get live today totals.
-15. *(Optional)* **Show Notification** ← the step-14 result — you'll see `{"ok":true,"acked":{...},"today":{...}}`.
-16. *(Once MF Nightly exists)* **Run Shortcut** → **MF Nightly**. Every sync then also refreshes today's totals,
-    the foods eaten in the last 24 h and the saved-foods library — and the agent's `refresh_from_phone` tool
-    can trigger it through the same notification.
+2. **Get Dictionary from Input** ← Contents of URL.
+3. **Get Dictionary Value** → key `claim`.
+4. **Get Dictionary Value** → key `foods` (from the step-2 dictionary).
+5. **Repeat with Each** ← the `foods` value → inside: **Log by JSON** (MacroFactor) ← **Repeat Item**. End Repeat.
+   *(Only if you set `ENABLE_WATER_WEIGHT` to "true": repeat the same for keys `water` → **Log Water** (mL)
+   and `weight` → **Log Weight** (kg).)*
 
-> **Gotchas:** never rename Shortcut variables and never set a variable's Type to **URL** (coercing a
-> response to URL throws *"couldn't convert from Dictionary to URL"*). Type URLs directly into the
-> action. Repeat loops over an empty list are simply skipped, so running MF Sync with nothing queued
-> is harmless.
+*Part 2 — today's totals (and the ack)*
 
-**Pushcut (free tier is enough — one notification definition):**
+6. **Macros Remaining** (MacroFactor) — returns the full Today Summary JSON.
+7. **Get Contents of URL** — method **POST**, URL
+   `https://macrofactor-mcp.<your-subdomain>.workers.dev/sync-ack?token=<INGEST_SECRET>`
+   Headers: `claim` = the step-3 **Dictionary Value**. Request Body: tap **JSON** → switch to **File** ← the
+   **Macros Remaining** result.
+   This deletes the claimed queue rows, stores today's live totals with every nutrient, fills the day's
+   `days` / `micronutrients` rows and derives the day's targets from "remaining to goal".
 
-1. Install Pushcut → **Notifications → +** → name it `MacroFactor`, title/text e.g. "Tap to log".
-2. Action: **Run Shortcut → MF Sync**.
-3. Copy the notification's **Webhook URL** (`https://api.pushcut.io/<secret>/notifications/MacroFactor`).
-4. On the server:
-   ```bash
-   npx wrangler secret put PUSHCUT_WEBHOOK_URL   # paste the webhook URL
-   ```
+*Part 3 — recent foods*
 
-**Hands-free options:**
-- "Hey Siri, MF Sync" runs it without a notification.
-- Shortcuts → **Automation → + → App → MacroFactor → Is Closed → Run Immediately → MF Sync**
-  flushes anything queued whenever you close the app.
-- Time-of-day automations (e.g. 1 PM / 9 PM, Run Immediately) as backstops. iOS may delay these
-  when the phone is idle or in Low Power Mode.
-- Without Pushcut, entries still queue; the agent tells you to run MF Sync.
+8. **Find Recent Food** — no filter. (If the list is huge and slow: Sort by Time Last Consumed, Latest
+   First, Limit a few hundred.)
+9. **Repeat with Each** ← Recent Food → inside, one **Text** action with the Repeat Item's properties
+   separated by `|`, in exactly this order (tap the variable → pick the property):
 
----
+```
+[Name]|[Brand]|[Time Last Consumed]|[Consumption Count]|[Energy]|[Protein (g)]|[Carbs (g)]|[Fat (g)]|[Hours Consumed (24 hr)]
+```
+
+   Tap the inserted **Time Last Consumed** and set Date Format → **ISO 8601** (with time). End Repeat.
+10. **Combine Text** ← Repeat Results, with **New Lines**.
+11. **Get Contents of URL** — method **POST**, Request Body **File** ← Combined Text:
+    `https://macrofactor-mcp.<your-subdomain>.workers.dev/foods-seen?token=<INGEST_SECRET>`
+    Add `&dry_run=1` plus a **Show Notification** ← Contents of URL the first time to check the parse
+    (`shape`, `sample`, `other_days_skipped`, `library_upserted`), then remove it.
+
+Foods last eaten today become today's food-log rows (one per food, at Time Last Consumed); every food in
+the list is upserted into the saved-foods library (source `recent`, macros of the portion last logged).
+
+> **Gotchas:** never rename Shortcut variables and never set a variable's Type to **URL**. Type URLs
+> directly into the action. Repeat loops over an empty list are simply skipped.
+
+**Triggers**
+
+- **Pushcut** (free tier): Notifications → + → `MacroFactor`, action **Run Shortcut → MF Sync**; copy the
+  webhook URL → `npx wrangler secret put PUSHCUT_WEBHOOK_URL`. The agent fires it for logs and for
+  `refresh_from_phone`.
+- **Automations** (Shortcuts → Automation → +, all **Run Immediately**): App → MacroFactor → *Is Opened* and
+  *Is Closed* → MF Sync; Time of Day → **11:50 PM** → MF Sync (the nightly backstop; 11:50 keeps "today"
+  on the right date).
+- "Hey Siri, MF Sync".
 
 ## Shortcut 2 — "Update MF" (optional: refresh history from your phone)
 
@@ -106,75 +102,10 @@ Repeat for each export you want refreshed. From a computer, `npm run ingest -- f
 
 ---
 
-## Shortcut 3 — "MF Nightly" (optional: history without exports)
+## What still needs an export
 
-Runs itself every night (Automation → Time of Day → **11:50 PM** → Run Immediately → MF Nightly) and
-pushes the day's totals and the day's foods, so the export is only needed occasionally.
-
-MacroFactor exposes three read actions: **Macros Remaining** (the whole Today Summary as JSON),
-**Get Nutrition State** (one nutrient per call) and **Find Recent Food**,
-whose results carry Name, Brand, Time Last Consumed, Consumption Count, Hours Consumed (24 hr), and every
-nutrient (Energy, Protein (g), … Zinc (mg)).
-
-**Part A — today's totals (one action)**
-
-1. Add MacroFactor's **Macros Remaining** action. Its result is the full Today Summary JSON —
-   `{consumed: {…every nutrient…}, remaining: {…goal deltas…}}`.
-2. **Get Contents of URL** — POST, header `x-ingest-secret` = `<INGEST_SECRET>`, Request Body **File** ←
-   the Macros Remaining result:
-
-```
-https://macrofactor-mcp.<your-subdomain>.workers.dev/today
-```
-
-The server stores the summary (today's live totals), fills the `days` and `micronutrients` rows for that
-date, and derives the day's calorie/macro targets from "remaining to goal" (tagged live; a later export
-replaces them). `/today` also accepts individual numbers as query params (`?energy=…&protein=…`,
-`rem_energy=…` for remaining-to-goal) if you ever prefer **Get Nutrition State**.
-
-**Part B — today's foods**
-
-4. **Find Recent Food** — no filter needed: the server files foods last eaten today into today's food
-   log and puts *every* food into the saved-foods library. (If the unfiltered list is huge and slow, set
-   Sort by **Time Last Consumed**, Order **Latest First**, and a Limit of a few hundred.)
-5. **Repeat with Each** ← Recent Food. Inside the loop add ONE **Text** action containing the Repeat Item's
-   properties separated by `|`, in exactly this order (tap the variable → pick the property):
-
-```
-[Name]|[Brand]|[Time Last Consumed]|[Consumption Count]|[Energy]|[Protein (g)]|[Carbs (g)]|[Fat (g)]|[Hours Consumed (24 hr)]
-```
-
-   Hours Consumed is a list and goes last: if Shortcuts spreads it over extra lines, the server folds
-   those into the food above. Tap the inserted **Time Last Consumed** variable and set its Date Format
-   to **ISO 8601** (with time) so the timestamp carries an explicit offset; plain "Sep 2, 2026 at 1:05 PM"
-   text works too. **End Repeat.**
-6. **Combine Text** ← Repeat Results, with **New Lines**.
-7. **Get Contents of URL** — POST, Request Body **File** ← Combined Text:
-
-```
-https://macrofactor-mcp.<your-subdomain>.workers.dev/foods-seen?token=<INGEST_SECRET>
-```
-
-   Append `&dry_run=1` the first time and add **Show Notification** ← Contents of URL to check the parse
-   (`shape`, `sample`, `unrecognized_keys`) without storing; then remove it. A JSON array of dictionaries
-   or `{items:[…]}` is accepted too.
-
-The server writes one `food_log` row per food last eaten today (at its Time Last Consumed) tagged
-`shortcut` — Consumption Count / Hours Consumed are lifetime stats, so a second helping of the same food
-shows once; day totals come from Part A, not from these rows. An export's Food Log CSV replaces them. Every
-food in the post (any date) is upserted into the saved-foods library as source `recent` (macros of the
-portion last logged), so `search_my_foods` / `log_saved_food` work from what you actually eat — those rows
-survive export uploads.
-
-**On demand:** because MF Sync ends with *Run Shortcut → MF Nightly*, the agent's `refresh_from_phone`
-tool (or any tap of the MacroFactor notification) refreshes all of this whenever it's needed.
-
-Targets come along too: every summary carries "remaining to goal", so the server derives the day's
-calorie/macro targets and keeps the targets table current without an export.
-
-**Still export-only:** MacroFactor's expenditure (TDEE) and its trend weight (raw weight and body
-measurements are in Apple Health), plus workouts/training aggregates if you use MacroFactor Workouts.
-Nothing else needs Update MF.
+MacroFactor's expenditure (TDEE) and its trend weight (raw weight and body measurements are in Apple
+Health), plus workouts/training aggregates if you use MacroFactor Workouts. Nothing else needs Update MF.
 
 ## Optional — "MF Today" (refresh today without logging)
 

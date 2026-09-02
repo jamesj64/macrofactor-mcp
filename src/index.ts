@@ -28,6 +28,7 @@ export interface Env {
   USDA_API_KEY?: string;            // optional; DEMO_KEY (30 req/h) without it
   MF_SOURCE?: string;               // `source` stamped on every Log by JSON payload
   USER_TZ?: string;                 // IANA zone that defines "today"
+  ENABLE_WATER_WEIGHT?: string;     // "true" to expose log_water / log_weight (off by default: weight comes via Apple Health)
 }
 
 const READ_ONLY = { readOnlyHint: true } as const;
@@ -162,7 +163,8 @@ const MCP_INSTRUCTIONS = `MacroFactor nutrition + training server for one user. 
 today feed); writes are queued and land in MacroFactor only after the user taps a notification on their iPhone
 (or runs the "MF Sync" Shortcut / asks Siri). Logs always land at the CURRENT time — there is no backdating.
 
-Logging playbook ("add a jersey mike's giant turkey sub, no toppings"):
+Logging: food only (water/weight tools are disabled unless ENABLE_WATER_WEIGHT is set; body weight reaches MacroFactor
+from Apple Health). Playbook ("add a jersey mike's giant turkey sub, no toppings"):
 1. search_my_foods / search_food first — the user's saved foods are the most accurate; USDA + Open Food Facts cover
    generic and packaged foods. Chain-restaurant menus are NOT in any database here: web-search the chain's official
    nutrition page, take the item's components (bread, meat, cheese; drop the toppings the user excluded), and sum them.
@@ -175,8 +177,9 @@ Logging playbook ("add a jersey mike's giant turkey sub, no toppings"):
 Never fabricate precision: if a chain publishes ranges or you estimated, say so in notes and in your reply.
 Use get_today for "what's left today", weekly_review for check-ins, cancel_pending_log for "never mind".
 
-Data freshness: history comes from a phone feed (MF Nightly) that posts today's totals, micros, targets and the foods
-eaten in the last 24 h whenever the user syncs and every night, plus an OPTIONAL MacroFactor export. Only two things
+Data freshness: every run of the user's "MF Sync" Shortcut (notification tap, app open/close, nightly automation,
+refresh_from_phone) posts today's totals, micros and targets plus the recent-foods list, which also maintains the
+saved-foods library. A MacroFactor export is OPTIONAL. Only two things
 need an export: MacroFactor's expenditure (TDEE) and its trend weight. If today looks stale, call refresh_from_phone
 and re-query after the user taps the notification. search_my_foods / log_saved_food cover foods the user has actually
 eaten (source 'recent'). The user syncs MacroFactor to Apple Health, so if your client has an Apple Health tool, raw
@@ -1270,6 +1273,7 @@ export class MyMCP extends McpAgent<Env> {
       },
     );
 
+    if (String(this.env.ENABLE_WATER_WEIGHT).toLowerCase() === "true") {
     this.server.registerTool(
       "log_water",
       {
@@ -1325,14 +1329,16 @@ export class MyMCP extends McpAgent<Env> {
       },
     );
 
+    }
+
     this.server.registerTool(
       "refresh_from_phone",
       {
         title: "Ask the phone to refresh data",
         description:
           "Pings the user's iPhone (same notification as logging). Tapping it — or saying 'Hey Siri, MF Sync' — runs " +
-          "MF Sync, which drains any queued logs and then runs MF Nightly: today's totals/targets and the foods eaten " +
-          "in the last 24 h are re-posted, and the saved-foods library ('recent' rows) is refreshed. Call this when " +
+          "the MF Sync Shortcut, which drains any queued logs and then re-posts today's totals/targets (all nutrients) " +
+          "and the recent-foods list, refreshing the food log and the saved-foods library. Call this when " +
           "data_status / get_today looks stale and you need current numbers; then re-query after the user confirms. " +
           "Does not log anything.",
         inputSchema: {},
@@ -1348,7 +1354,7 @@ export class MyMCP extends McpAgent<Env> {
         }
         return text({
           status: "sent",
-          message: "Pinged the phone. Once the user taps the MacroFactor notification (or runs MF Sync via Siri), today's totals and recent foods are refreshed — check data_status.today_live / get_today afterwards.",
+          message: "Pinged the phone. Once the user taps the MacroFactor notification (or runs MF Sync via Siri / it fires on app open), today's totals, targets and recent foods are refreshed — check get_today or data_status afterwards.",
         });
       },
     );

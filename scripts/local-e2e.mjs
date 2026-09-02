@@ -72,14 +72,14 @@ const lb = await call("log_foods_batch", { items: [{ name: "Banana", calories: 1
 check("log_foods_batch queued 2", lb.count === 2 && lb.queue_ids?.length === 2);
 const lr = await call("log_recipe", { name: "Test bowl", ingredients: [{ name: "Rice", calories: 200, carbs: 45 }, { name: "Chicken", calories: 165, protein: 31 }] });
 check("log_recipe summed", /365 kcal/.test(lr.message ?? ""), lr.message?.slice(-60));
-await call("log_water", { ml: 500 });
-await call("log_weight", { kg: 180, unit: "lbs" });
+const WW = tools.some((t) => t.name === "log_water");
+if (WW) { await call("log_water", { ml: 500 }); await call("log_weight", { kg: 180, unit: "lbs" }); }
 const pend = await call("get_pending_logs", {});
-check("get_pending_logs shows 4 foods + water + weight", pend.food?.length === 4 && pend.water?.length === 1 && pend.weight?.length === 1, `food=${pend.food?.length} water=${pend.water?.length} weight=${pend.weight?.length}`);
+check(`get_pending_logs shows 4 foods${WW ? " + water + weight" : ""}`, pend.food?.length === 4 && (!WW || (pend.water?.length === 1 && pend.weight?.length === 1)), `food=${pend.food?.length} water=${pend.water?.length} weight=${pend.weight?.length}`);
 
 // Simulate the MF Sync Shortcut.
 const claimRes = await fetch(`${base}/pending-all?token=${SECRET}`).then((r) => r.json());
-check("/pending-all claims everything", claimRes.count === 6 && claimRes.foods.length === 4 && claimRes.water[0] === 500 && Math.abs(claimRes.weight[0] - 81.647) < 0.01, JSON.stringify({ count: claimRes.count, water: claimRes.water, weight: claimRes.weight }));
+check("/pending-all claims everything", claimRes.foods.length === 4 && (!WW || (claimRes.count === 6 && claimRes.water[0] === 500 && Math.abs(claimRes.weight[0] - 81.647) < 0.01)), JSON.stringify({ count: claimRes.count, water: claimRes.water, weight: claimRes.weight }));
 const sub = claimRes.foods[0];
 check("payload matches official schema keys", ["source", "icon", "name", "nutrients", "serving", "brand", "notes", "llmPrompt"].every((k) => k in sub) && !("_pending_id" in sub) && sub.nutrients.energy === 1010, JSON.stringify(sub).slice(0, 160));
 check("recipe children are complete foods", claimRes.foods[3].recipe?.every((c) => c.source && c.icon && c.serving && c.nutrients));
@@ -90,7 +90,7 @@ check("pending shows claimed:true", pend2.food?.every((f) => f.claimed === true)
 
 const summary = { consumed: { energy: 1282, protein: 93, carbs: 190, fat: 30, water: 500 }, remaining: { energy: { target: 918 }, protein: { target: 87 }, carbs: { target: 60 }, fat: { target: 40 }, water: { minimum: 1500, target: 2000, maximum: 3500 } } };
 const ack = await fetch(`${base}/sync-ack?token=${SECRET}&claim=${claimRes.claim}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(summary) }).then((r) => r.json());
-check("/sync-ack deletes claimed rows", ack.ok && ack.acked?.foods === 4 && ack.acked?.water === 1 && ack.acked?.weight === 1, JSON.stringify(ack.acked));
+check("/sync-ack deletes claimed rows", ack.ok && ack.acked?.foods === 4 && (!WW || (ack.acked?.water === 1 && ack.acked?.weight === 1)), JSON.stringify(ack.acked));
 check("/sync-ack stored today summary", ack.today?.consumed?.calories === 1282, JSON.stringify(ack.today));
 const pend3 = await call("get_pending_logs", {});
 check("queue empty after ack", pend3.total_pending === 0 && pend3.recent_dispatches?.some((d) => d.landed === true && /Jersey/.test(d.name)));

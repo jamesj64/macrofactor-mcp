@@ -71,7 +71,7 @@ The server also ships MCP *instructions* with this playbook, so any client that 
 | `log_recipe` | One entry whose nutrients are the sum of its `ingredients[]` (shown as components in the app) |
 | `log_saved_food` | A saved Favorite/Custom food by name × servings |
 | `relog_meal` | Re‑log a past day's meal (optional hour window) as one entry |
-| `log_water`, `log_weight` | Via MacroFactor's dedicated actions (mL / kg or lbs) |
+| `log_water`, `log_weight` | Via MacroFactor's dedicated actions — off by default (`ENABLE_WATER_WEIGHT`), since weight usually arrives via Apple Health |
 | `get_pending_logs`, `cancel_pending_log` | See what's queued or claimed by the phone; "never mind" |
 | `refresh_from_phone` | Ping the phone to re-post today's totals, recent foods and the saved-foods library (no logging) |
 
@@ -165,10 +165,10 @@ npm test                         # schema tests against MacroFactor's official s
 |---|---|---|
 | `/mcp/<MCP_TOKEN>` | the agent | MCP (Streamable HTTP) |
 | `GET /pending-all?token=` | MF Sync | claim everything queued: `{claim, count, foods[], water[], weight[]}` |
-| `POST /sync-ack?token=&claim=` | MF Sync | delete the claimed rows; body = MacroFactor's Today Summary → live today |
+| `POST /sync-ack?token=` (+ `claim` header) | MF Sync | delete the claimed rows; body = Today Summary (Macros Remaining) → live today, day rows, targets |
 | `POST /upload-export` | Update MF / `npm run ingest` | parse an export into D1 |
-| `POST /today` | MF Nightly / refresh Shortcut | live totals for a date; any MacroFactor nutrient key as a query param; gap-fills `days` + `micronutrients` |
-| `POST /foods-seen` | MF Nightly | the day's foods from MacroFactor's Find Recent Food action → `food_log` (tagged `shortcut`) + saved-foods library (`recent`) |
+| `POST /today` | optional | a Today Summary body (Macros Remaining) or nutrient query params for a date; gap-fills `days` + `micronutrients` + targets |
+| `POST /foods-seen` | MF Sync | MacroFactor's Find Recent Food list → today's `food_log` rows (tagged `shortcut`) + saved-foods library (`recent`) |
 | `GET /health` | you | D1 check |
 | `/pending`, `/pending-water`, `/pending-weight`, `/pending-batch`, `/ack-batch`, `/cancel-pending` | legacy Shortcuts | per‑type queues from upstream |
 
@@ -191,8 +191,8 @@ targets, foods and all logging.
 
 - Entries land at **sync time** — MacroFactor's actions have no date field. Pass `intended_time`
   to any food-write tool and the server matches it against the Food Log CSV on the next import.
-- With the MF Nightly Shortcut, totals, micros, targets, the food log and the saved-foods library all come
-  from the phone; **today** is live after every sync. Only MacroFactor's expenditure (TDEE) and trend weight
+- Every MF Sync run (tap, app open/close, 11:50 PM automation, `refresh_from_phone`) posts today's totals,
+  micros, targets and the recent-foods list, so the food log and the saved-foods library come from the phone. Only MacroFactor's expenditure (TDEE) and trend weight
   (and workouts) still need an export — the export is optional otherwise.
 - USDA and Open Food Facts don't have chain-restaurant menus; the agent uses web search for those and
   logs explicit numbers (it is told to say so in `notes`).

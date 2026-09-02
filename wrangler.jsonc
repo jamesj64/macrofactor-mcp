@@ -32,7 +32,9 @@
     // IANA timezone that defines "today" for the live feed and intended-time matching.
     "USER_TZ": "America/Los_Angeles",
     // Stable `source` identifier stamped on every Log by JSON payload (MacroFactor asks for one).
-    "MF_SOURCE": "claude-macrofactor-mcp"
+    "MF_SOURCE": "claude-macrofactor-mcp",
+    // "true" exposes log_water / log_weight (and needs the Log Water / Log Weight loops in the Shortcut).
+    "ENABLE_WATER_WEIGHT": "false"
   },
 
   // Secrets (set via `npx wrangler secret put NAME`, do NOT put them here):
