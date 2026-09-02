@@ -23,7 +23,8 @@ export interface Env {
   IMPORT_DO: DurableObjectNamespace;
   INGEST_SECRET: string;
   MCP_TOKEN?: string;
-  PUSHCUT_WEBHOOK_URL?: string;     // one notification → runs the "MF Sync" Shortcut
+  PUSHCUT_WEBHOOK_URL?: string;     // notification "MacroFactor" → runs the "MF Sync" Shortcut (write path)
+  PUSHCUT_REFRESH_WEBHOOK_URL?: string; // notification "MacroFactor Refresh" → runs "MF Nightly" (read path)
   PUSHCUT_PR_WEBHOOK_URL?: string;  // optional "new PR" alert
   USDA_API_KEY?: string;            // optional; DEMO_KEY (30 req/h) without it
   MF_SOURCE?: string;               // `source` stamped on every Log by JSON payload
@@ -60,8 +61,8 @@ interface PushResult { status: PushStatus; detail?: string }
 // Ping the phone: one pre-configured Pushcut notification whose action runs the "MF Sync"
 // Shortcut. The push carries NO dynamic fields (that needs Pushcut Pro) — everything is already
 // queued in D1 and the Shortcut pulls it from /pending-all after the tap.
-async function notifyPhone(env: Env): Promise<PushResult> {
-  const url = env.PUSHCUT_WEBHOOK_URL;
+async function notifyPhone(env: Env, target: "sync" | "refresh" = "sync"): Promise<PushResult> {
+  const url = target === "refresh" ? env.PUSHCUT_REFRESH_WEBHOOK_URL : env.PUSHCUT_WEBHOOK_URL;
   if (!url) return { status: "queued_only" };
   try {
     const res = await fetch(url, { method: "POST" });
@@ -177,9 +178,10 @@ from Apple Health). Playbook ("add a jersey mike's giant turkey sub, no toppings
 Never fabricate precision: if a chain publishes ranges or you estimated, say so in notes and in your reply.
 Use get_today for "what's left today", weekly_review for check-ins, cancel_pending_log for "never mind".
 
-Data freshness: every run of the user's "MF Sync" Shortcut (notification tap, app open/close, nightly automation,
-refresh_from_phone) posts today's totals, micros and targets plus the recent-foods list, which also maintains the
-saved-foods library. A MacroFactor export is OPTIONAL. Only two things
+Data freshness: the user's read-only "MF Nightly" Shortcut (nightly automation, app open/close, or refresh_from_phone)
+posts today's totals, micros and targets plus the recent-foods list, which also maintains the saved-foods library.
+Writes go through the separate "MF Sync" Shortcut, which only runs when the user taps the logging notification. A
+MacroFactor export is OPTIONAL. Only two things
 need an export: MacroFactor's expenditure (TDEE) and its trend weight. If today looks stale, call refresh_from_phone
 and re-query after the user taps the notification. search_my_foods / log_saved_food cover foods the user has actually
 eaten (source 'recent'). The user syncs MacroFactor to Apple Health, so if your client has an Apple Health tool, raw
@@ -1334,27 +1336,27 @@ export class MyMCP extends McpAgent<Env> {
     this.server.registerTool(
       "refresh_from_phone",
       {
-        title: "Ask the phone to refresh data",
+        title: "Ask the phone to refresh data (read-only)",
         description:
-          "Pings the user's iPhone (same notification as logging). Tapping it — or saying 'Hey Siri, MF Sync' — runs " +
-          "the MF Sync Shortcut, which drains any queued logs and then re-posts today's totals/targets (all nutrients) " +
-          "and the recent-foods list, refreshing the food log and the saved-foods library. Call this when " +
-          "data_status / get_today looks stale and you need current numbers; then re-query after the user confirms. " +
-          "Does not log anything.",
+          "Pings the user's iPhone with the 'MacroFactor Refresh' notification. Tapping it — or saying 'Hey Siri, MF " +
+          "Nightly' — runs the read-only MF Nightly Shortcut: today's totals/targets (every nutrient) and MacroFactor's " +
+          "recent-foods list are re-posted, refreshing the food log and the saved-foods library. Nothing is logged. " +
+          "Call this when data_status / get_today looks stale and you need current numbers; then re-query after the " +
+          "user confirms.",
         inputSchema: {},
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       },
       async () => {
-        const r = await notifyPhone(this.env);
+        const r = await notifyPhone(this.env, "refresh");
         if (r.status === "queued_only") {
-          return text({ status: r.status, message: "No phone push is configured (PUSHCUT_WEBHOOK_URL). Ask the user to run the 'MF Sync' Shortcut (or 'Hey Siri, MF Sync') to refresh." });
+          return text({ status: "not_configured", message: "No refresh push is configured (PUSHCUT_REFRESH_WEBHOOK_URL). Ask the user to run the 'MF Nightly' Shortcut (or 'Hey Siri, MF Nightly') to refresh." });
         }
         if (r.status === "push_failed") {
-          return text({ status: r.status, message: `Push failed (${r.detail}). Ask the user to run 'MF Sync' manually.` });
+          return text({ status: r.status, message: `Push failed (${r.detail}). Ask the user to run 'MF Nightly' manually.` });
         }
         return text({
           status: "sent",
-          message: "Pinged the phone. Once the user taps the MacroFactor notification (or runs MF Sync via Siri / it fires on app open), today's totals, targets and recent foods are refreshed — check get_today or data_status afterwards.",
+          message: "Pinged the phone. Once the user taps the 'MacroFactor Refresh' notification (or runs MF Nightly), today's totals, targets and recent foods are refreshed — check get_today or data_status afterwards.",
         });
       },
     );

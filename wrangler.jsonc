@@ -40,7 +40,8 @@
   // Secrets (set via `npx wrangler secret put NAME`, do NOT put them here):
   //   INGEST_SECRET          - shared secret for the phone/PC endpoints (/pending-all, /sync-ack, /today, /upload-export, ...)
   //   MCP_TOKEN              - (recommended) makes the MCP URL capability-style /mcp/<token>
-  //   PUSHCUT_WEBHOOK_URL    - (optional) Pushcut webhook that pings the phone to run the "MF Sync" Shortcut
+  //   PUSHCUT_WEBHOOK_URL         - (optional) Pushcut webhook "MacroFactor" → runs the "MF Sync" Shortcut (writes)
+  //   PUSHCUT_REFRESH_WEBHOOK_URL - (optional) Pushcut webhook "MacroFactor Refresh" → runs "MF Nightly" (reads)
   //   PUSHCUT_PR_WEBHOOK_URL - (optional) Pushcut webhook for "new PR" alerts
   //   USDA_API_KEY           - (optional but recommended) free key from fdc.nal.usda.gov/api-key-signup; DEMO_KEY (30 req/h) otherwise
 

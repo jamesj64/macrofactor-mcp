@@ -73,7 +73,7 @@ The server also ships MCP *instructions* with this playbook, so any client that 
 | `relog_meal` | Re‑log a past day's meal (optional hour window) as one entry |
 | `log_water`, `log_weight` | Via MacroFactor's dedicated actions — off by default (`ENABLE_WATER_WEIGHT`), since weight usually arrives via Apple Health |
 | `get_pending_logs`, `cancel_pending_log` | See what's queued or claimed by the phone; "never mind" |
-| `refresh_from_phone` | Ping the phone to re-post today's totals, recent foods and the saved-foods library (no logging) |
+| `refresh_from_phone` | Ping the phone's read-only "MacroFactor Refresh" notification → MF Nightly re-posts today's totals, recent foods and the saved-foods library (never logs) |
 
 **Reads & analytics** (from the upstream project, unchanged)
 
@@ -115,7 +115,8 @@ Set `USER_TZ` in `wrangler.jsonc` to your IANA timezone (it decides what "today"
 npx wrangler secret put INGEST_SECRET     # openssl rand -hex 32 — used by your phone/PC endpoints
 npx wrangler secret put MCP_TOKEN         # openssl rand -hex 32 — makes the MCP URL unguessable
 npx wrangler secret put USDA_API_KEY      # optional but recommended
-npx wrangler secret put PUSHCUT_WEBHOOK_URL   # after building the Shortcut (ios-setup.md)
+npx wrangler secret put PUSHCUT_WEBHOOK_URL           # "MacroFactor" notification → MF Sync (writes)
+npx wrangler secret put PUSHCUT_REFRESH_WEBHOOK_URL   # "MacroFactor Refresh" notification → MF Nightly (reads)
 ```
 
 ### 4. Deploy
@@ -125,7 +126,7 @@ npm run deploy
 Note the URL it prints, e.g. `https://macrofactor-mcp.<you>.workers.dev`. `GET /health` should return `{"ok":true,…}`.
 
 ### 5. iPhone Shortcut
-Follow **[ios-setup.md](./ios-setup.md)** — one "MF Sync" Shortcut + one Pushcut notification.
+Follow **[ios-setup.md](./ios-setup.md)** — "MF Sync" (writes) and "MF Nightly" (reads), each with its own Pushcut notification.
 
 ### 6. Load your history
 MacroFactor → **More → Data Management → Data Export**. Either share the files to the "Update MF"
@@ -167,8 +168,8 @@ npm test                         # schema tests against MacroFactor's official s
 | `GET /pending-all?token=` | MF Sync | claim everything queued: `{claim, count, foods[], water[], weight[]}` |
 | `POST /sync-ack?token=` (+ `claim` header) | MF Sync | delete the claimed rows; body = Today Summary (Macros Remaining) → live today, day rows, targets |
 | `POST /upload-export` | Update MF / `npm run ingest` | parse an export into D1 |
-| `POST /today` | optional | a Today Summary body (Macros Remaining) or nutrient query params for a date; gap-fills `days` + `micronutrients` + targets |
-| `POST /foods-seen` | MF Sync | MacroFactor's Find Recent Food list → today's `food_log` rows (tagged `shortcut`) + saved-foods library (`recent`) |
+| `POST /today` | MF Nightly | a Today Summary body (Macros Remaining) or nutrient query params for a date; gap-fills `days` + `micronutrients` + targets |
+| `POST /foods-seen` | MF Nightly | MacroFactor's Find Recent Food list → today's `food_log` rows (tagged `shortcut`) + saved-foods library (`recent`) |
 | `GET /health` | you | D1 check |
 | `/pending`, `/pending-water`, `/pending-weight`, `/pending-batch`, `/ack-batch`, `/cancel-pending` | legacy Shortcuts | per‑type queues from upstream |
 
@@ -191,7 +192,7 @@ targets, foods and all logging.
 
 - Entries land at **sync time** — MacroFactor's actions have no date field. Pass `intended_time`
   to any food-write tool and the server matches it against the Food Log CSV on the next import.
-- Every MF Sync run (tap, app open/close, 11:50 PM automation, `refresh_from_phone`) posts today's totals,
+- The read-only MF Nightly Shortcut (11:50 PM, app close, or `refresh_from_phone`) posts today's totals,
   micros, targets and the recent-foods list, so the food log and the saved-foods library come from the phone. Only MacroFactor's expenditure (TDEE) and trend weight
   (and workouts) still need an export — the export is optional otherwise.
 - USDA and Open Food Facts don't have chain-restaurant menus; the agent uses web search for those and
