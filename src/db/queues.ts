@@ -1,7 +1,95 @@
 import { safeParse, ageFrom } from "./utils";
 
-export async function enqueueFood(DB: D1Database, payload: string, createdMs: number) {
-  await DB.prepare(`INSERT INTO pending_food (created, payload) VALUES (?, ?)`).bind(createdMs, payload).run();
+export async function enqueueFood(DB: D1Database, payload: string, createdMs: number): Promise<number> {
+  const r = await DB.prepare(`INSERT INTO pending_food (created, payload) VALUES (?, ?)`).bind(createdMs, payload).run();
+  return r.meta?.last_row_id ?? 0;
+}
+
+// Queue several foods atomically (one D1 batch) so a multi-item meal lands in one sync.
+export async function enqueueFoods(DB: D1Database, payloads: string[], createdMs: number): Promise<number[]> {
+  if (payloads.length === 0) return [];
+  const stmt = DB.prepare(`INSERT INTO pending_food (created, payload) VALUES (?, ?)`);
+  const results = await DB.batch(payloads.map((p) => stmt.bind(createdMs, p)));
+  return results.map((r) => r.meta?.last_row_id ?? 0);
+}
+
+// ---- Consolidated "MF Sync" flow: GET /pending-all claims everything, POST /sync-ack deletes it ----
+
+export interface ClaimedSync {
+  claim: number; // unix ms of the claim; the Shortcut echoes it back to /sync-ack
+  foods: { id: number; payload: string; batch_id?: number }[];
+  water: { id: number; ml: number }[];
+  weight: { id: number; kg: number }[];
+}
+
+// Claim every unclaimed (or stale-claimed) row across the food, batch, water and weight queues
+// under one `claim` stamp. Stale = claimed more than `staleLimitMs` ago without an ack (the
+// Shortcut crashed or the phone was offline) — those rows are re-served.
+export async function claimAllPending(DB: D1Database, staleLimitMs = 600_000): Promise<ClaimedSync> {
+  const claim = Date.now();
+  const cutoff = claim - staleLimitMs;
+  const cond = `(claimed_at IS NULL OR claimed_at < ?)`;
+  const [food, batch, water, weight] = await DB.batch([
+    DB.prepare(`SELECT id, payload FROM pending_food WHERE ${cond} ORDER BY id`).bind(cutoff),
+    DB.prepare(`SELECT id, items FROM pending_batch WHERE ${cond} ORDER BY id`).bind(cutoff),
+    DB.prepare(`SELECT id, ml FROM pending_water WHERE ${cond} ORDER BY id`).bind(cutoff),
+    DB.prepare(`SELECT id, kg FROM pending_weight WHERE ${cond} ORDER BY id`).bind(cutoff),
+  ]);
+  const foods: ClaimedSync["foods"] = (food.results as any[]).map((r) => ({ id: r.id, payload: r.payload }));
+  for (const b of batch.results as any[]) {
+    const items = safeParse(b.items) as unknown;
+    if (Array.isArray(items)) {
+      for (const it of items) foods.push({ id: 0, payload: JSON.stringify(it), batch_id: b.id });
+    }
+  }
+  const waters = (water.results as any[]).map((r) => ({ id: r.id, ml: r.ml }));
+  const weights = (weight.results as any[]).map((r) => ({ id: r.id, kg: r.kg }));
+
+  const updates: D1PreparedStatement[] = [];
+  const stamp = (table: string, ids: number[]) => {
+    if (ids.length) updates.push(DB.prepare(`UPDATE ${table} SET claimed_at = ? WHERE id IN (${ids.map(() => "?").join(",")})`).bind(claim, ...ids));
+  };
+  stamp("pending_food", foods.filter((f) => f.id > 0).map((f) => f.id));
+  stamp("pending_batch", (batch.results as any[]).map((b) => b.id));
+  stamp("pending_water", waters.map((w) => w.id));
+  stamp("pending_weight", weights.map((w) => w.id));
+  for (const f of foods) {
+    if (f.id > 0) {
+      const p = safeParse(f.payload) as any;
+      updates.push(
+        DB.prepare(
+          `INSERT OR REPLACE INTO food_dispatch_log (pending_id, name, calories, served_at_ms, landed_at_ms) VALUES (?, ?, ?, ?, NULL)`,
+        ).bind(f.id, p?.name ?? null, p?.nutrients?.energy ?? null, claim),
+      );
+    }
+  }
+  if (updates.length) await DB.batch(updates);
+  return { claim, foods, water: waters, weight: weights };
+}
+
+// Delete everything claimed under `claim` and mark the food dispatches as landed.
+export async function ackClaim(
+  DB: D1Database, claim: number, landedMs: number,
+): Promise<{ foods: number; batches: number; water: number; weight: number }> {
+  const ids = ((await DB.prepare(`SELECT id FROM pending_food WHERE claimed_at = ?`).bind(claim).all()).results as any[]).map((r) => r.id as number);
+  const stmts: D1PreparedStatement[] = [];
+  if (ids.length) {
+    stmts.push(DB.prepare(`UPDATE food_dispatch_log SET landed_at_ms = ? WHERE pending_id IN (${ids.map(() => "?").join(",")})`).bind(landedMs, ...ids));
+  }
+  stmts.push(
+    DB.prepare(`DELETE FROM pending_food WHERE claimed_at = ?`).bind(claim),
+    DB.prepare(`DELETE FROM pending_batch WHERE claimed_at = ?`).bind(claim),
+    DB.prepare(`DELETE FROM pending_water WHERE claimed_at = ?`).bind(claim),
+    DB.prepare(`DELETE FROM pending_weight WHERE claimed_at = ?`).bind(claim),
+  );
+  const res = await DB.batch(stmts);
+  const del = res.slice(ids.length ? 1 : 0);
+  return {
+    foods: del[0]?.meta?.changes ?? 0,
+    batches: del[1]?.meta?.changes ?? 0,
+    water: del[2]?.meta?.changes ?? 0,
+    weight: del[3]?.meta?.changes ?? 0,
+  };
 }
 
 // Returns {id, payload} for the oldest queued food and deletes the row, or null if empty.
@@ -101,18 +189,21 @@ export async function ackBatch(DB: D1Database, id: number): Promise<boolean> {
 
 export async function getPendingLogs(DB: D1Database) {
   const [food, water, weight, batch, dispatches] = await Promise.all([
-    DB.prepare(`SELECT id, created, payload FROM pending_food ORDER BY id`).all(),
-    DB.prepare(`SELECT id, created, ml FROM pending_water ORDER BY id`).all(),
-    DB.prepare(`SELECT id, created, kg FROM pending_weight ORDER BY id`).all(),
+    DB.prepare(`SELECT id, created, payload, claimed_at FROM pending_food ORDER BY id`).all(),
+    DB.prepare(`SELECT id, created, ml, claimed_at FROM pending_water ORDER BY id`).all(),
+    DB.prepare(`SELECT id, created, kg, claimed_at FROM pending_weight ORDER BY id`).all(),
     DB.prepare(`SELECT id, created, item_count, claimed_at, items FROM pending_batch ORDER BY id`).all(),
     getRecentDispatches(DB, Date.now() - 86400000),
   ]);
   const foods = (food.results as any[]).map((r) => {
     const p = safeParse(r.payload);
-    return { id: r.id, name: (p as any).name ?? null, calories: (p as any).nutrients?.energy ?? null, queued_ago: ageFrom(r.created) };
+    return {
+      id: r.id, name: (p as any).name ?? null, calories: (p as any).nutrients?.energy ?? null,
+      queued_ago: ageFrom(r.created), claimed: r.claimed_at != null,
+    };
   });
-  const waters = (water.results as any[]).map((r) => ({ id: r.id, ml: r.ml, queued_ago: ageFrom(r.created) }));
-  const weights = (weight.results as any[]).map((r) => ({ id: r.id, kg: r.kg, queued_ago: ageFrom(r.created) }));
+  const waters = (water.results as any[]).map((r) => ({ id: r.id, ml: r.ml, queued_ago: ageFrom(r.created), claimed: r.claimed_at != null }));
+  const weights = (weight.results as any[]).map((r) => ({ id: r.id, kg: r.kg, queued_ago: ageFrom(r.created), claimed: r.claimed_at != null }));
   const batches = (batch.results as any[]).map((r) => ({
     id: r.id, item_count: r.item_count, claimed: r.claimed_at != null, queued_ago: ageFrom(r.created),
     items: (safeParse(r.items) as unknown as any[])?.map?.((i: any) => i?.name).filter(Boolean) ?? [],
@@ -129,10 +220,10 @@ export async function getPendingLogs(DB: D1Database) {
     recent_dispatches,
     note:
       "Items listed here are queued on the server and NOT yet logged — they land in MacroFactor only " +
-      "after the user taps the Pushcut notification and the Shortcut runs. Use cancel_pending_log to remove. " +
+      "after the user taps the notification (or runs the 'MF Sync' Shortcut / asks Siri). Use cancel_pending_log to remove. " +
+      "claimed:true = the phone has fetched it but not yet confirmed; it is re-served after 10 min if no ack arrives. " +
       "recent_dispatches (last 24h) shows foods the phone has pulled; landed:true means the Shortcut confirmed " +
-      "the log landed in MacroFactor (and refreshed today's live totals in the same step). " +
-      "landed:false = tapped but no confirmation received (Shortcut may predate the ack step, or MacroFactor errored).",
+      "the log landed in MacroFactor (and refreshed today's live totals in the same step).",
   };
 }
 
@@ -173,9 +264,9 @@ export async function matchFoodIntents(DB: D1Database): Promise<{ matched: numbe
   return { matched, ambiguous };
 }
 
-// ---- cancel_pending_log: clear unclaimed rows from pending queues ----
-// Every row in pending_food/water/weight is unclaimed until popped (no claimed column);
-// pending_batch may have claimed-but-not-acked rows, which a cancel still clears.
+// ---- cancel_pending_log: clear ALL rows (claimed or not) from the pending queues ----
+// A row claimed by the phone but not yet acked is cleared too — if the Shortcut is mid-run the
+// food may still land; get_pending_logs.recent_dispatches shows what actually happened.
 export async function cancelPending(
   DB: D1Database,
   queues: ("food" | "water" | "weight" | "batch")[],

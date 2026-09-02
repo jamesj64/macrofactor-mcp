@@ -95,10 +95,25 @@ export function weekdayOf(date: string): string {
   return WEEKDAYS[new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
 }
 
-// The user's home timezone — set this to YOUR IANA timezone (e.g. "America/New_York").
-// "Today" on this single-user server means the owner's local calendar date: resolving it
-// in the wrong zone lands post-midnight /today posts on the previous day's live row.
-const USER_TZ = "UTC";
+// The user's home timezone (IANA, e.g. "America/Los_Angeles"), configured via the USER_TZ var in
+// wrangler.jsonc and applied with setUserTz() at request entry. "Today" on this single-user server
+// means the owner's local calendar date: resolving it in the wrong zone lands post-midnight /today
+// posts on the previous day's live row.
+let USER_TZ = "UTC";
+
+export function setUserTz(tz: string | undefined | null): void {
+  if (!tz || tz === USER_TZ) return;
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone: tz }); // throws on an invalid zone
+    USER_TZ = tz;
+  } catch {
+    // keep the previous zone; a typo in wrangler vars shouldn't take the server down
+  }
+}
+
+export function getUserTz(): string {
+  return USER_TZ;
+}
 
 export function todayLocal(): string {
   // en-CA formats as YYYY-MM-DD

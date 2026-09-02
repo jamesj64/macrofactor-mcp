@@ -1,6 +1,6 @@
 # MacroFactor MCP — Claude Project Reference
 
-**38 tools as of 2026-07-06. Paste this file into the Claude project you use with this connector as context.**
+**43 tools as of 2026-09-02 (jamesj64 fork). Paste this file into the Claude project you use with this connector as context.** The server also ships MCP `instructions` with the logging playbook.
 
 ---
 
@@ -12,24 +12,26 @@ A Cloudflare Worker backed by a D1 SQLite database. It ingests MacroFactor data 
 
 **Path B — Live /today feed:** A MacroFactor "Today-Summary" shortcut on the user's phone POSTs current macros to `POST /today` several times per day, independent of exports. `get_daily_nutrition` and `get_day` overlay this live feed onto the exported data for the current calendar date — live wins for macros (calories/protein/carbs/fat); the export still supplies expenditure, weight, and steps which the live feed doesn't carry. Tagged `live:true`. Earlier dates are gap-filled (not overwritten) by the live feed.
 
-**Write queues:** `log_food`, `log_saved_food`, `log_recipe`, `relog_meal`, `log_foods_batch`, `log_water`, `log_weight` write to four D1 queues (food / batch / water / weight). A Pushcut notification fires to the user's iPhone; the user taps → a Shortcuts action pulls from `/pending` (or `/pending-water`, `/pending-weight`, `/pending-batch`) and calls MacroFactor's "Log by JSON" or "Log Water" / "Log Weight" Shortcuts action. Food lands in MacroFactor at tap-time, not queue-time.
+**Write queues:** `log_food`, `log_saved_food`, `log_recipe`, `relog_meal`, `log_foods_batch` write MacroFactorFood rows to `pending_food`; `log_water` / `log_weight` write to `pending_water` / `pending_weight`. One Pushcut notification fires; the user taps it (or says "Hey Siri, MF Sync") → the **MF Sync** Shortcut calls `GET /pending-all`, which claims every queued row and returns `{claim, count, foods[], water[], weight[]}`; the Shortcut loops them through MacroFactor's "Log by JSON" / "Log Water" / "Log Weight" actions and finally `POST /sync-ack?claim=` with MacroFactor's returned Today Summary. Food lands in MacroFactor at sync-time, not queue-time.
+
+**Food search:** `search_food` / `get_food_nutrients` / `lookup_barcode` query USDA FoodData Central and Open Food Facts live (plus `food_library` from the export). `search` / `fetch` are ChatGPT-connector-shaped wrappers.
 
 ---
 
 ## 2. Write-confirmation loop
 
 ```
-log_food / log_foods_batch / log_recipe / relog_meal / log_saved_food
-  ↓ enqueues to pending_food / pending_batch + fires Pushcut notification
-User taps notification on iPhone
-  ↓ Shortcut calls GET /pending (or /pending-batch)
-  ↓ Shortcut calls MacroFactor "Log by JSON" with the payload
-  ↓ Shortcut POSTs MacroFactor's Today-Summary to POST /today?ack_id=<pending_id>
-    → ack marks food_dispatch_log.landed_at_ms (confirming the log landed)
-    → today feed updated in same step
+log_food / log_foods_batch / log_recipe / relog_meal / log_saved_food / log_water / log_weight
+  ↓ validated against the official MacroFactorFood schema, enqueued, ONE Pushcut notification
+User taps notification (or Siri / app-closed automation) → "MF Sync" Shortcut
+  ↓ GET /pending-all  → claims all rows under one `claim` stamp (re-served after 10 min if unacked)
+  ↓ Log by JSON ×N, Log Water ×N, Log Weight ×N
+  ↓ POST /sync-ack?claim=<stamp>  body = MacroFactor's Today Summary
+    → deletes the claimed rows, marks food_dispatch_log.landed_at_ms
+    → upserts today_summary (consumed + remaining-vs-goal for every nutrient) → get_today is live
 ```
 
-**get_pending_logs** shows the current state of all four queues plus `recent_dispatches` (last 24 h of foods the phone has pulled):
+**get_pending_logs** shows every queue (with `claimed:true` once the phone has fetched a row) plus `recent_dispatches` (last 24 h of foods the phone has pulled):
 - `landed:true` — Shortcut confirmed log landed in MacroFactor AND refreshed today totals
 - `landed:false` — phone pulled the item but no `/today` ack received (Shortcut may predate the ack step, or MacroFactor errored; food may still have landed)
 
@@ -530,32 +532,79 @@ Personal record achievements detected since the last export upload.
 
 ---
 
+#### `search_food`
+Name search across the user's saved foods (export), USDA FoodData Central and Open Food Facts.
+
+| Param | Type |
+|---|---|
+| query | string (required) |
+| sources | ("saved"\|"usda"\|"off")[] — default all |
+| limit | int 1–25 per source (default 6) |
+| data_types | USDA data types; add "Survey (FNDDS)" for typical prepared dishes |
+| brand | USDA brand-owner filter |
+
+**Response:** `{query, saved: [{source, name, brand?, saved_as, serving, per_serving, log_with}], usda: [{source, id, name, brand?, category?, serving?, per_serving?, per_100g}], off: [...same...], errors: {}, hint?, next}`. `per_100g` / `per_serving` carry energy (kcal), protein, carbs, fat, fiber, sugars, sodium (mg), saturatedFat.
+
+**When to use:** First step for any food the user hasn't saved. Chain-restaurant items are NOT in these sources — web-search the chain's nutrition page and use `log_food` with explicit nutrients.
+
+---
+
+#### `get_food_nutrients`
+Full nutrient dictionary for a `search_food` / `lookup_barcode` hit, scaled to an amount.
+
+| Param | Type |
+|---|---|
+| source | "usda" \| "off" (required) |
+| id | fdcId or barcode (required) |
+| grams | number — amount eaten (mL for liquids) |
+| servings | number — label/household servings (default 1 when grams omitted) |
+| portion | string — pick a portion by (partial) description, e.g. "cup" |
+
+**Response:** `{source, id, name, brand?, category?, amount, amount_basis, nutrients, per_100g, portions: [{description, grams}], ingredients?, log_food_args: {name, brand?, serving, nutrients, barcode?}, note}`. `nutrients` uses MacroFactor keys/units and is scaled to `amount`.
+
+**When to use:** Between `search_food` and `log_food`; pass `log_food_args` straight through (add icon / notes / llm_prompt).
+
+---
+
+#### `lookup_barcode`
+UPC/EAN → product with label nutrients (Open Food Facts, then USDA Branded).
+
+| Param | Type |
+|---|---|
+| barcode | string (required) |
+| grams, servings | as in get_food_nutrients |
+
+**Response:** same shape as `get_food_nutrients`, or `{status:"not_found", barcode, errors, message}`.
+
+---
+
+#### `search` / `fetch`
+ChatGPT-connector-shaped wrappers. `search(query)` → `{results: [{id, title, url}]}` with ids like `usda:<fdcId>`, `off:<barcode>`, `saved:<name>`. `fetch(id)` → `{id, title, text, url, metadata}` where `metadata` is the `get_food_nutrients` row (or the saved food's per-serving macros). Prefer `search_food` / `get_food_nutrients` when the client exposes all tools.
+
+---
+
 #### `log_food`
-Log a food by specifying macros explicitly.
+Log ONE food. Flat macro fields OR a full `nutrients` dictionary (dictionary wins).
 
 | Param | Type | Required |
 |---|---|---|
 | name | string | yes |
-| calories | number | yes |
-| protein | number (g) | no |
-| carbs | number (g) | no |
-| fat | number (g) | no |
-| fiber | number (g) | no |
-| sugar | number (g) | no |
-| sodium_mg | number (mg) | no |
-| saturated_fat | number (g) | no |
-| brand | string | no |
-| notes | string | no |
-| alcohol_g | number (g ethanol) | no |
-| caffeine_mg | number (mg) | no |
-| beverage | "alcohol"\|"beverage" | no |
+| calories | number (kcal) | unless `nutrients.energy` |
+| protein / carbs / fat / fiber / sugar / saturated_fat / alcohol_g | number (g) | no |
+| sodium_mg / caffeine_mg | number (mg) | no |
+| nutrients | {energy, protein, …, vitaminD, …} — official MacroFactor keys/units | no |
+| serving | "one" (default) \| "per100Grams" \| "per100ML" \| {amount, unit} \| {amount, label, weight} | no |
+| icon | MacroFactor icon name (guessed from the name when omitted) | no |
+| brand, barcode, notes, llm_prompt | string | no |
+| beverage | "alcohol" \| "beverage" | no |
+| recipe | [{name, calories \| nutrients, …}] component breakdown (parent summed when calories omitted) | no |
 | intended_time | "HH:MM" (24h) | no |
 
-All nutrients = totals for the **portion eaten** (not per-100g). Queues food → Pushcut → tap to log in MacroFactor. Cannot backdate. A standard drink ≈ 10 g AU / 14 g US ethanol. `beverage:"alcohol"` ensures Apple Health tracks hydration and alcohol correctly.
+With serving `"one"` the nutrients are the totals for the portion eaten; with a measured/custom serving they describe that amount (`weight` = grams represented). The payload is validated against the official schema before queueing; an invalid one returns `{status:"invalid", message}` without queueing.
 
-**Returns:** String message with status (sent / queued_only / push_failed) and instructions.
+**Returns:** `{status: "sent"|"queued_only"|"push_failed", message, logged_as: {name, brand?, icon, serving, macros}, queue_id}`.
 
-**When to use:** Logging any food where you know the macros but it's not a saved food. For saved favorites, prefer `log_saved_food`.
+**When to use:** Any food with known/estimated nutrients that isn't a saved food. Put the breakdown and the source of the numbers in `notes`, the user's original words in `llm_prompt`.
 
 ---
 
@@ -577,17 +626,17 @@ Log a saved Favorite/Custom food by name, scaling by servings.
 ---
 
 #### `log_recipe`
-Log a named multi-ingredient meal, macros summed across ingredients.
+One entry whose nutrients are the SUM of its ingredients, each attached as a complete child food in `recipe[]`.
 
-| Param | Type | Required |
-|---|---|---|
-| name | string | yes |
-| ingredients | array of {name, calories (required), protein?, carbs?, fat?, fiber?, sugar?, sodium_mg?, saturated_fat?} | yes (min 1) |
-| intended_time | "HH:MM" (24h) | no |
+| Param | Type |
+|---|---|
+| name | string (required) |
+| ingredients | [{name, calories \| nutrients, protein, …, serving?, icon?, brand?, notes?}] 1–30 (required) |
+| icon, brand, serving, notes, llm_prompt, intended_time | as in log_food |
 
-Macros are summed. A `recipe[]` children array is attached to the payload for MacroFactor to show components when expanded. If MacroFactor ignores recipe[], the parent's summed macros still log correctly.
+**Returns:** `{status, message, components: [{name, macros}], queue_id}`.
 
-**Returns:** Ingredient count, total macro summary, dispatch message.
+**When to use:** Home-cooked meals, or restaurant items built from published components (bread + meat + cheese).
 
 ---
 
@@ -609,17 +658,9 @@ Aggregates all food_log items for `date` (optionally filtered to `[start_hour, e
 ---
 
 #### `log_foods_batch`
-Log 1–20 foods in a single phone tap.
+1–30 foods as SEPARATE entries in one sync. Each item takes the same fields as `log_food` (plus `intended_time`). Items are validated and enqueued atomically (one D1 batch) to `pending_food`; one notification fires.
 
-| Param | Type | Required |
-|---|---|---|
-| items | array (min 1, max 20) of {name, calories, protein?, carbs?, fat?, fiber?, sugar?, sodium_mg?, saturated_fat?, brand?, notes?, alcohol_g?, caffeine_mg?, beverage?, intended_time?} | yes |
-
-Uses a separate batch queue (`/pending-batch`) and the "MF Log Batch" Shortcut (fires from `PUSHCUT_BATCH_WEBHOOK_URL`). One push notification for the entire batch.
-
-**Returns:** `{batch_id, count, items:[names], status, message}`.
-
-**When to use:** Photo-estimated multi-item meal, logging a full day in one shot.
+**Returns:** `{status, count, message, items: [{name, icon, macros}], queue_ids}`.
 
 ---
 
@@ -749,3 +790,15 @@ No tools were removed. All 21 tools from the previous doc are present.
 ### Doc corrections (2026-07-05)
 
 Response shapes for `weekly_summary`, `get_adherence`, `get_prs`, `data_status`, and `get_body_metrics` were previously documented wrong (flat arrays / phantom fields / wrong wrappers) and have been corrected against the live server. Also fixed: the micronutrient default-set count (25 NIH-RDA + 4 extras = 29 total, not "29 RDA / ~33"), `get_pr_alerts`'s timestamp field name (`detected_at`, not `detected_at_ms`), `get_today`'s export-fallback field omissions, and a new warning that `get_training_day_nutrition` tiers count MacroFactor-logged sets only (externally logged training reads as `rest`).
+
+
+---
+
+## 6. Changed in the jamesj64 fork (2026-09-02)
+
+- **Food search:** `search_food`, `get_food_nutrients`, `lookup_barcode` (USDA FoodData Central + Open Food Facts + saved foods); `search` / `fetch` for ChatGPT connectors.
+- **Full official schema on writes:** `log_food` / `log_foods_batch` / `log_recipe` accept `nutrients` (all 55 MacroFactor keys), `serving` objects, `icon`, `barcode`, `llm_prompt`, `recipe[]`; payloads are validated before queueing. Recipe children are complete MacroFactorFood objects.
+- **One Shortcut:** `GET /pending-all` + `POST /sync-ack` replace the five per-type Shortcuts; one Pushcut notification (`PUSHCUT_WEBHOOK_URL`). `log_foods_batch` now queues individual `pending_food` rows. Claimed rows are re-served after 10 min without an ack.
+- **Live today from every sync:** `/sync-ack` stores the Today Summary MacroFactor returns from Log by JSON.
+- **Config:** `USER_TZ` and `MF_SOURCE` are `wrangler.jsonc` vars; `USDA_API_KEY` secret. `PUSHCUT_WATER/WEIGHT/BATCH_WEBHOOK_URL` removed.
+- **Tests:** `npm test` validates payloads against MacroFactor's official sample JSON; `scripts/local-e2e.mjs` exercises the whole write path against `npm run dev` without a phone.

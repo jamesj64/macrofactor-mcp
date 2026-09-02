@@ -3,7 +3,15 @@ import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 
 import * as db from "./db";
-import { buildFoodPayload, buildRecipePayload, type LogFoodArgs } from "./nutrients";
+import {
+  DEFAULT_SOURCE, buildFoodPayload, buildRecipePayload, foodItemShape, intendedTimeField, macroSummary,
+  recipeChildShape, validateFoodPayload, type LogFoodArgs,
+} from "./nutrients";
+import { type MacroFactorFood, type Nutrients } from "./mf-schema";
+import {
+  getFoodDetail, getOFFProduct, headline, nutrientsFor, resolveAmount, searchOFF, searchUSDA,
+  type FoodDetail, type FoodHit,
+} from "./foodsearch";
 import { handleIngest } from "./ingest";
 import { ImportDO } from "./importer";
 
@@ -15,11 +23,11 @@ export interface Env {
   IMPORT_DO: DurableObjectNamespace;
   INGEST_SECRET: string;
   MCP_TOKEN?: string;
-  PUSHCUT_WEBHOOK_URL?: string;
-  PUSHCUT_WATER_WEBHOOK_URL?: string;
-  PUSHCUT_WEIGHT_WEBHOOK_URL?: string;
-  PUSHCUT_BATCH_WEBHOOK_URL?: string;
-  PUSHCUT_PR_WEBHOOK_URL?: string;
+  PUSHCUT_WEBHOOK_URL?: string;     // one notification → runs the "MF Sync" Shortcut
+  PUSHCUT_PR_WEBHOOK_URL?: string;  // optional "new PR" alert
+  USDA_API_KEY?: string;            // optional; DEMO_KEY (30 req/h) without it
+  MF_SOURCE?: string;               // `source` stamped on every Log by JSON payload
+  USER_TZ?: string;                 // IANA zone that defines "today"
 }
 
 const READ_ONLY = { readOnlyHint: true } as const;
@@ -45,19 +53,13 @@ const dateRange = {
   end_date: z.string().optional().describe("YYYY-MM-DD"),
 };
 
-// Queue a food payload for the iPhone Shortcut (GET /pending → Log by JSON) and fire the
-// pre-configured Pushcut notification. The push carries NO dynamic fields — that requires
-// Pushcut Pro; the food is already queued and the Shortcut pulls it after you tap.
-async function dispatchFood(
-  env: Env,
-  payloadStr: string,
-  intendedTime?: string,
-): Promise<{ status: "queued_only" | "sent" | "push_failed"; detail?: string }> {
-  await db.enqueueFood(env.DB, payloadStr, Date.now());
-  if (intendedTime) {
-    const p = JSON.parse(payloadStr);
-    await db.recordFoodIntent(env.DB, p.name ?? "?", p.nutrients?.energy ?? null, intendedTime, Date.now());
-  }
+type PushStatus = "queued_only" | "sent" | "push_failed";
+interface PushResult { status: PushStatus; detail?: string }
+
+// Ping the phone: one pre-configured Pushcut notification whose action runs the "MF Sync"
+// Shortcut. The push carries NO dynamic fields (that needs Pushcut Pro) — everything is already
+// queued in D1 and the Shortcut pulls it from /pending-all after the tap.
+async function notifyPhone(env: Env): Promise<PushResult> {
   const url = env.PUSHCUT_WEBHOOK_URL;
   if (!url) return { status: "queued_only" };
   try {
@@ -68,29 +70,110 @@ async function dispatchFood(
     }
     return { status: "sent" };
   } catch (err) {
-    // Network-level failure (DNS / timeout / dropped). The food is already queued, so surface the
+    // Network-level failure (DNS / timeout / dropped). The rows are already queued, so surface the
     // recoverable push_failed path rather than throwing a raw MCP error with no recovery hint.
     return { status: "push_failed", detail: String(err).slice(0, 150) };
   }
 }
 
-// Human-facing result message for a queued food, given dispatchFood's status.
-function foodMsg(label: string, r: { status: string; detail?: string }): string {
+// Queue one or more validated MacroFactorFood payloads (+ optional intended eat-times) and ping
+// the phone once.
+async function queueFoods(
+  env: Env,
+  payloads: MacroFactorFood[],
+  intendedTimes: (string | undefined)[] = [],
+): Promise<PushResult & { ids: number[] }> {
+  const now = Date.now();
+  const ids = await db.enqueueFoods(env.DB, payloads.map((p) => JSON.stringify(p)), now);
+  for (let i = 0; i < payloads.length; i++) {
+    const t = intendedTimes[i];
+    if (t) await db.recordFoodIntent(env.DB, payloads[i].name, payloads[i].nutrients.energy ?? null, t, now);
+  }
+  const r = await notifyPhone(env);
+  return { ...r, ids };
+}
+
+// Human-facing result message for queued item(s), given the push status.
+function foodMsg(label: string, r: PushResult): string {
   if (r.status === "queued_only") {
     return (
-      `Queued "${label}". The logging push isn't configured yet — set the ` +
-      `PUSHCUT_WEBHOOK_URL secret and the iPhone Shortcut (see ios-setup.md). ` +
-      `Until then it waits at /pending.`
+      `Queued ${label}. The phone push isn't configured yet — set the PUSHCUT_WEBHOOK_URL secret and build the ` +
+      `"MF Sync" iPhone Shortcut (see ios-setup.md). Until then it waits on the server; running MF Sync by hand ` +
+      `(or "Hey Siri, sync MacroFactor") logs it.`
     );
   }
   if (r.status === "push_failed") {
     return (
-      `Queued "${label}", but the Pushcut notification failed (${r.detail}). ` +
-      `You can still run the Shortcut manually to pull it from /pending.`
+      `Queued ${label}, but the Pushcut notification failed (${r.detail}). ` +
+      `Run the "MF Sync" Shortcut manually (or via Siri) to log it.`
     );
   }
-  return `Sent "${label}" to your phone. Tap the notification to log it in MacroFactor — confirm with get_pending_logs (landed:true).`;
+  return (
+    `Sent ${label} to your phone. Tap the MacroFactor notification (or say "Hey Siri, sync MacroFactor") to log it — ` +
+    `confirm with get_pending_logs (landed:true) or get_today.`
+  );
 }
+
+// Compact listing row for search results.
+function hitRow(h: FoodHit) {
+  return {
+    source: h.source,
+    id: h.id,
+    name: h.name,
+    ...(h.brand ? { brand: h.brand } : {}),
+    ...(h.category ? { category: h.category } : {}),
+    ...(h.serving ? { serving: `${h.serving.description} (${h.serving.grams} g)` } : {}),
+    ...(h.per_serving ? { per_serving: h.per_serving } : {}),
+    per_100g: h.per100g,
+  };
+}
+
+// Full detail for get_food_nutrients / fetch: nutrients scaled to the requested amount, plus a
+// ready-to-paste log_food argument object.
+function detailRow(d: FoodDetail, want: { grams?: number; servings?: number; portion?: string }) {
+  const amt = resolveAmount(d, want);
+  const nutrients = nutrientsFor(d, amt.grams);
+  return {
+    source: d.source,
+    id: d.id,
+    name: d.name,
+    ...(d.brand ? { brand: d.brand } : {}),
+    ...(d.category ? { category: d.category } : {}),
+    amount: amt.label,
+    amount_basis: amt.basis,
+    nutrients,
+    per_100g: headline(d.per100g),
+    portions: d.portions.slice(0, 12),
+    ...(d.ingredients ? { ingredients: d.ingredients } : {}),
+    log_food_args: {
+      name: d.brand ? `${d.name} (${d.brand})` : d.name,
+      ...(d.brand ? { brand: d.brand } : {}),
+      serving: amt.serving,
+      nutrients,
+      ...(d.barcode ? { barcode: d.barcode } : {}),
+    },
+    note:
+      "`nutrients` is scaled to `amount` (energy kcal; g/mg/mcg per MacroFactor units). Pass `log_food_args` " +
+      "straight to log_food (add icon/notes/llm_prompt), or re-call with grams/servings/portion to rescale.",
+  };
+}
+
+const MCP_INSTRUCTIONS = `MacroFactor nutrition + training server for one user. Reads come from the app's export (and a live
+today feed); writes are queued and land in MacroFactor only after the user taps a notification on their iPhone
+(or runs the "MF Sync" Shortcut / asks Siri). Logs always land at the CURRENT time — there is no backdating.
+
+Logging playbook ("add a jersey mike's giant turkey sub, no toppings"):
+1. search_my_foods / search_food first — the user's saved foods are the most accurate; USDA + Open Food Facts cover
+   generic and packaged foods. Chain-restaurant menus are NOT in any database here: web-search the chain's official
+   nutrition page, take the item's components (bread, meat, cheese; drop the toppings the user excluded), and sum them.
+2. get_food_nutrients turns a search hit into a scaled nutrient dictionary and a ready log_food_args object.
+3. Call log_food (one item) or log_foods_batch (a meal) with: an exact name, brand, a fitting icon, a serving
+   ({amount:1, label:"giant sub", weight:<g>} or {amount:<g>, unit:"grams"}), the full nutrients you know (at least
+   energy/protein/carbs/fat; add fiber/sugars/sodium/saturatedFat when available), notes = your breakdown + source,
+   llm_prompt = the user's original words verbatim. State the numbers you used and any assumptions in your reply.
+4. Tell the user to tap the notification; get_today (live) or get_pending_logs (landed:true) confirms it.
+Never fabricate precision: if a chain publishes ranges or you estimated, say so in notes and in your reply.
+Use get_today for "what's left today", weekly_review for check-ins, cancel_pending_log for "never mind".`;
 
 // Recompute all-time PRs from workout_sets, write any new ones to pr_alerts, and fire the
 // "New PR" Pushcut push. Runs in a background context (ctx.waitUntil after /upload-export and
@@ -114,10 +197,13 @@ function inferMealLabel(date: string, startHour?: number): string {
 }
 
 export class MyMCP extends McpAgent<Env> {
-  server = new McpServer({ name: "MacroFactor", version: "0.1.0" });
+  server = new McpServer({ name: "MacroFactor", version: "0.2.0" }, { instructions: MCP_INSTRUCTIONS });
 
   async init() {
+    db.setUserTz(this.env.USER_TZ);
     const DB = () => this.env.DB;
+    const usdaKey = () => this.env.USDA_API_KEY;
+    const buildOpts = () => ({ source: this.env.MF_SOURCE || DEFAULT_SOURCE });
 
     this.server.registerTool(
       "get_daily_nutrition",
@@ -633,46 +719,289 @@ export class MyMCP extends McpAgent<Env> {
       async ({ since_date }) => text(await db.getPrAlerts(DB(), since_date)),
     );
 
+    // ---- Food search (external databases + saved foods) ----
+
+    const savedRows = async (query: string, limit: number) => {
+      const r = await db.searchFoods(DB(), query);
+      return (r.loggable as any[]).slice(0, limit).map((f) => ({
+        source: "saved" as const,
+        name: f.name,
+        ...(f.brand ? { brand: f.brand } : {}),
+        saved_as: f.source,
+        serving: `${f.serving_qty ?? 1} ${f.serving_size ?? "serving"}`.trim() + (f.serving_weight_g ? ` (${f.serving_weight_g} g)` : ""),
+        per_serving: { energy: f.calories, protein: f.protein, carbs: f.carbs, fat: f.fat },
+        log_with: "log_saved_food",
+      }));
+    };
+
+    const runSearch = async (
+      query: string,
+      sources: ("saved" | "usda" | "off")[],
+      limit: number,
+      opts: { dataTypes?: string[]; brandOwner?: string } = {},
+    ) => {
+      const want = new Set(sources);
+      const [saved, usda, off] = await Promise.allSettled([
+        want.has("saved") ? savedRows(query, limit) : Promise.resolve([]),
+        want.has("usda") ? searchUSDA(query, usdaKey(), { limit, ...opts }) : Promise.resolve([] as FoodHit[]),
+        want.has("off") ? searchOFF(query, { limit }) : Promise.resolve([] as FoodHit[]),
+      ]);
+      const errors: Record<string, string> = {};
+      const val = <T,>(r: PromiseSettledResult<T>, name: string, empty: T): T => {
+        if (r.status === "fulfilled") return r.value;
+        errors[name] = String(r.reason?.message ?? r.reason).slice(0, 200);
+        return empty;
+      };
+      return {
+        saved: val(saved, "saved", []),
+        usda: val(usda, "usda", [] as FoodHit[]).map(hitRow),
+        off: val(off, "off", [] as FoodHit[]).map(hitRow),
+        errors,
+      };
+    };
+
+    this.server.registerTool(
+      "search_food",
+      {
+        title: "Search food databases",
+        description:
+          "Find a food and its macros by name across (1) the user's SAVED MacroFactor foods (Favorites / Custom / history " +
+          "from the export — most accurate, log with log_saved_food), (2) USDA FoodData Central (whole foods, generic dishes, " +
+          "US packaged foods) and (3) Open Food Facts (packaged products worldwide). Rows carry per-100 g and per-serving " +
+          "macros plus an id for get_food_nutrients. NOT covered: chain-restaurant menu items (Jersey Mike's, Chipotle, …) — " +
+          "for those, web-search the chain's official nutrition page, build the item from its components, and call log_food " +
+          "with explicit nutrients. Search short generic terms ('turkey breast deli', 'provolone'), not sentences.",
+        inputSchema: {
+          query: z.string().min(1).describe("Food name / keywords"),
+          sources: z.array(z.enum(["saved", "usda", "off"])).optional().describe("Default: all three"),
+          limit: z.number().int().min(1).max(25).optional().describe("Max rows per source (default 6)"),
+          data_types: z
+            .array(z.enum(["Foundation", "SR Legacy", "Branded", "Survey (FNDDS)"]))
+            .optional()
+            .describe("USDA data types (default Foundation, SR Legacy, Branded; add 'Survey (FNDDS)' for typical prepared dishes)"),
+          brand: z.string().optional().describe("USDA brand-owner filter, e.g. 'Kraft Heinz'"),
+        },
+        annotations: READ_ONLY,
+      },
+      async ({ query, sources, limit, data_types, brand }) => {
+        const res = await runSearch(query, sources ?? ["saved", "usda", "off"], limit ?? 6, {
+          dataTypes: data_types,
+          brandOwner: brand,
+        });
+        const total = res.saved.length + res.usda.length + res.off.length;
+        return text({
+          query,
+          ...res,
+          ...(total === 0
+            ? {
+                hint:
+                  "No matches. Try a shorter/generic query, a different spelling, or sources:['usda'] with data_types " +
+                  "['Survey (FNDDS)'] for prepared dishes. For chain restaurants use web search on the chain's nutrition page " +
+                  "and log_food with explicit nutrients.",
+              }
+            : {}),
+          next: "Call get_food_nutrients(source, id, grams|servings|portion) for the full nutrient dictionary and a ready log_food_args.",
+        });
+      },
+    );
+
+    this.server.registerTool(
+      "get_food_nutrients",
+      {
+        title: "Full nutrients for a food, scaled to an amount",
+        description:
+          "Fetch the complete nutrient profile of a search_food / lookup_barcode hit (USDA fdcId or Open Food Facts barcode) " +
+          "scaled to the amount eaten — grams (or mL for liquids), a number of label/household servings, or a named portion " +
+          "(e.g. 'cup', 'slice') — and return a log_food_args object you can pass straight to log_food. Defaults to one label " +
+          "serving when known, else 100 g.",
+        inputSchema: {
+          source: z.enum(["usda", "off"]),
+          id: z.string().min(1).describe("fdcId (usda) or barcode (off)"),
+          grams: z.number().positive().optional().describe("Amount eaten in grams (mL for liquids)"),
+          servings: z.number().positive().optional().describe("Number of label/household servings eaten (default 1 when grams is omitted)"),
+          portion: z.string().optional().describe("Pick a household portion by (partial) description from the food's portions list, e.g. 'cup'"),
+        },
+        annotations: READ_ONLY,
+      },
+      async ({ source, id, grams, servings, portion }) => {
+        let d: FoodDetail | null;
+        try {
+          d = await getFoodDetail(source, id, usdaKey());
+        } catch (e) {
+          return text({ status: "error", message: `${source} lookup failed: ${String((e as Error).message).slice(0, 200)}` });
+        }
+        if (!d) return text({ status: "not_found", message: `No ${source} food with id ${id}.` });
+        return text(detailRow(d, { grams, servings, portion }));
+      },
+    );
+
+    this.server.registerTool(
+      "lookup_barcode",
+      {
+        title: "Look up a packaged food by barcode",
+        description:
+          "Resolve a UPC/EAN barcode to a product with label nutrients (Open Food Facts first, then USDA Branded). " +
+          "Returns the same shape as get_food_nutrients (one label serving by default; pass grams/servings to rescale).",
+        inputSchema: {
+          barcode: z.string().min(6).describe("Digits only, e.g. 0049000042566"),
+          grams: z.number().positive().optional(),
+          servings: z.number().positive().optional(),
+        },
+        annotations: READ_ONLY,
+      },
+      async ({ barcode, grams, servings }) => {
+        const code = barcode.replace(/\D/g, "");
+        const errors: Record<string, string> = {};
+        let d: FoodDetail | null = null;
+        try {
+          d = await getOFFProduct(code);
+        } catch (e) {
+          errors.off = String((e as Error).message).slice(0, 200);
+        }
+        if (!d) {
+          try {
+            const hits = await searchUSDA(code, usdaKey(), { limit: 3, dataTypes: ["Branded"] });
+            const exact = hits.find((h) => h.barcode && h.barcode.replace(/^0+/, "") === code.replace(/^0+/, "")) ?? hits[0];
+            if (exact) d = await getFoodDetail("usda", exact.id, usdaKey());
+          } catch (e) {
+            errors.usda = String((e as Error).message).slice(0, 200);
+          }
+        }
+        if (!d) return text({ status: "not_found", barcode: code, errors, message: "No product found for this barcode in Open Food Facts or USDA Branded." });
+        return text({ ...detailRow(d, { grams, servings }), ...(Object.keys(errors).length ? { errors } : {}) });
+      },
+    );
+
+    // ---- OpenAI / ChatGPT connector compatibility ----
+    // ChatGPT's connector modes expect two read-only tools named `search` and `fetch` with fixed
+    // result shapes (results:[{id,title,url}] / {id,title,text,url,metadata}). Thin wrappers.
+
+    const foodUrl = (source: string, id: string) =>
+      source === "usda"
+        ? `https://fdc.nal.usda.gov/food-details/${encodeURIComponent(id)}/nutrients`
+        : source === "off"
+          ? `https://world.openfoodfacts.org/product/${encodeURIComponent(id)}`
+          : `macrofactor://saved/${encodeURIComponent(id)}`;
+
+    this.server.registerTool(
+      "search",
+      {
+        title: "Search (connector-style)",
+        description:
+          "Connector-style food search over the user's saved foods, USDA and Open Food Facts. Returns {results:[{id,title,url}]}; " +
+          "pass an id to `fetch` for full nutrients. Prefer search_food when you can call it directly.",
+        inputSchema: { query: z.string().min(1) },
+        annotations: READ_ONLY,
+      },
+      async ({ query }) => {
+        const res = await runSearch(query, ["saved", "usda", "off"], 5);
+        const results: { id: string; title: string; url: string }[] = [];
+        for (const f of res.saved) {
+          results.push({
+            id: `saved:${f.name}`,
+            title: `${f.name}${f.brand ? ` (${f.brand})` : ""} — ${f.per_serving.energy ?? "?"} kcal per ${f.serving} [saved]`,
+            url: foodUrl("saved", f.name),
+          });
+        }
+        for (const h of [...res.usda, ...res.off]) {
+          const e = h.per_serving?.energy ?? h.per_100g.energy;
+          const per = h.per_serving ? `per ${h.serving}` : "per 100 g";
+          results.push({
+            id: `${h.source}:${h.id}`,
+            title: `${h.name}${h.brand ? ` (${h.brand})` : ""} — ${e ?? "?"} kcal ${per} [${h.source}]`,
+            url: foodUrl(h.source, h.id),
+          });
+        }
+        return text({ results });
+      },
+    );
+
+    this.server.registerTool(
+      "fetch",
+      {
+        title: "Fetch (connector-style)",
+        description:
+          "Connector-style document fetch for an id returned by `search` (usda:<fdcId>, off:<barcode>, saved:<name>). " +
+          "Returns {id,title,text,url,metadata} where metadata carries the nutrient dictionary and log_food_args.",
+        inputSchema: { id: z.string().min(1) },
+        annotations: READ_ONLY,
+      },
+      async ({ id }) => {
+        const m = id.match(/^(usda|off|saved):(.+)$/);
+        if (!m) return text({ id, title: "Unknown id", text: "Ids look like usda:<fdcId>, off:<barcode> or saved:<name>.", url: "", metadata: {} });
+        const [, src, key] = m;
+        if (src === "saved") {
+          const { loggable } = await db.lookupSavedFood(DB(), key, true);
+          const f = loggable[0];
+          if (!f) return text({ id, title: "Not found", text: `No saved food named "${key}".`, url: foodUrl("saved", key), metadata: {} });
+          const n: Nutrients = { energy: f.calories, protein: f.protein ?? undefined, carbs: f.carbs ?? undefined, fat: f.fat ?? undefined };
+          return text({
+            id,
+            title: f.name,
+            text: `${f.name}${f.brand ? ` (${f.brand})` : ""}: ${macroSummary(n)} per ${f.serving_qty ?? 1} ${f.serving_size ?? "serving"}. Log with log_saved_food(food:"${f.name}", exact:true).`,
+            url: foodUrl("saved", f.name),
+            metadata: { source: "saved", saved_as: f.source, per_serving: n },
+          });
+        }
+        let d: FoodDetail | null = null;
+        try {
+          d = await getFoodDetail(src as "usda" | "off", key, usdaKey());
+        } catch (e) {
+          return text({ id, title: "Lookup failed", text: String((e as Error).message).slice(0, 200), url: foodUrl(src, key), metadata: {} });
+        }
+        if (!d) return text({ id, title: "Not found", text: `No ${src} food with id ${key}.`, url: foodUrl(src, key), metadata: {} });
+        const row = detailRow(d, {});
+        return text({
+          id,
+          title: `${d.name}${d.brand ? ` (${d.brand})` : ""}`,
+          text: `${row.amount}: ${macroSummary(row.nutrients)}. Portions: ${row.portions.map((p) => `${p.description} = ${p.grams} g`).join("; ") || "n/a"}.`,
+          url: foodUrl(d.source, d.id),
+          metadata: row,
+        });
+      },
+    );
+
     // ---- Write tools ----
+
+    const invalid = (e: unknown) => text({ status: "invalid", message: String((e as Error).message) });
 
     this.server.registerTool(
       "log_food",
       {
         title: "Log a food to MacroFactor",
         description:
-          "Log a food into MacroFactor at the CURRENT time, via the user's iPhone. " +
-          "Pass the TOTAL nutrients for the portion actually eaten (not per-100g). " +
-          "Sends a notification to the phone; the user taps it to confirm and log. " +
-          "Cannot backdate (always logs 'now'). For a food the user has already SAVED " +
-          "(a Favorite/Custom with stored macros), prefer log_saved_food. " +
-          "Can log alcohol (alcohol_g) and tag beverages — use beverage:'alcohol' for drinks. " +
-          "Pass intended_time (HH:MM) when the food was actually eaten to correct nutrient-timing analytics after your next export.",
+          "Log ONE food into MacroFactor at the CURRENT time via the user's iPhone (queued → push notification → one tap, " +
+          "or the 'MF Sync' Shortcut / Siri). Cannot backdate. Give EITHER the flat macro fields (calories/protein/carbs/fat/…) " +
+          "OR a full `nutrients` dictionary (e.g. from get_food_nutrients.log_food_args); with the default serving \"one\" " +
+          "these are the TOTALS for the portion eaten. Fill brand, a fitting icon, a serving with the grams eaten when known, " +
+          "notes with the component breakdown + source of the numbers, and llm_prompt with the user's original words. " +
+          "Optional recipe[] lists sub-components (parent totals are summed from them when calories is omitted). " +
+          "For a food the user has SAVED in MacroFactor prefer log_saved_food; for several foods at once use log_foods_batch.",
         inputSchema: {
-          name: z.string().describe("Food title, e.g. 'Chicken breast (150g)'"),
-          calories: z.number().describe("Total kcal for the portion"),
-          protein: z.number().optional().describe("grams"),
-          carbs: z.number().optional().describe("grams"),
-          fat: z.number().optional().describe("grams"),
-          fiber: z.number().optional().describe("grams"),
-          sugar: z.number().optional().describe("grams"),
-          sodium_mg: z.number().optional().describe("milligrams"),
-          saturated_fat: z.number().optional().describe("grams"),
-          brand: z.string().optional(),
-          notes: z.string().optional(),
-          alcohol_g: z.number().optional().describe("grams of ethanol (a standard drink ≈ 10g AU / 14g US)"),
-          caffeine_mg: z.number().optional().describe("milligrams"),
-          beverage: z.enum(["alcohol", "beverage"]).optional()
-            .describe("tag drinks so MacroFactor/Apple Health track hydration & alcohol correctly"),
-          intended_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional()
-            .describe("HH:MM (24h) when the food was actually EATEN. MacroFactor always logs at tap-time; this hint corrects nutrient-timing analytics after your next food-log export."),
+          ...foodItemShape,
+          recipe: z
+            .array(z.object(recipeChildShape))
+            .max(30)
+            .optional()
+            .describe("Optional component breakdown, each with its own nutrients; MacroFactor shows them when the entry is expanded"),
+          intended_time: intendedTimeField,
         },
         annotations: WRITE_HINT,
       },
       async (args) => {
-        (args as any).llm_prompt = `Logged via Claude MCP: ${args.name}`;
-        const payload = buildFoodPayload(args as LogFoodArgs);
-        const r = await dispatchFood(this.env, JSON.stringify(payload), (args as any).intended_time);
-        return text(foodMsg(args.name, r));
+        let payload: MacroFactorFood;
+        try {
+          payload = validateFoodPayload(buildFoodPayload(args as unknown as LogFoodArgs, buildOpts()));
+        } catch (e) {
+          return invalid(e);
+        }
+        const r = await queueFoods(this.env, [payload], [args.intended_time]);
+        return text({
+          status: r.status,
+          message: foodMsg(`"${payload.name}"`, r),
+          logged_as: { name: payload.name, brand: payload.brand, icon: payload.icon, serving: payload.serving, macros: macroSummary(payload.nutrients) },
+          queue_id: r.ids[0],
+        });
       },
     );
 
@@ -699,12 +1028,12 @@ export class MyMCP extends McpAgent<Env> {
             .enum(["favorite", "custom", "history"])
             .optional()
             .describe("Restrict to one source (favorite/custom/history) to break a name tie."),
-          intended_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional()
-            .describe("HH:MM (24h) when the food was actually EATEN. MacroFactor always logs at tap-time; this hint corrects nutrient-timing analytics after your next food-log export."),
+          llm_prompt: foodItemShape.llm_prompt,
+          intended_time: intendedTimeField,
         },
         annotations: WRITE_HINT,
       },
-      async ({ food, servings, exact, source, intended_time }) => {
+      async ({ food, servings, exact, source, llm_prompt, intended_time }) => {
         const n = servings != null && Number.isFinite(servings) && servings > 0 ? servings : 1;
         const { loggable, nameOnly } = await db.lookupSavedFood(DB(), food, !!exact, source);
 
@@ -735,36 +1064,40 @@ export class MyMCP extends McpAgent<Env> {
           }
           return text({
             status: "not_found",
-            message: `No saved food matches "${food}". Try search_my_foods, or log_food with explicit macros.`,
+            message: `No saved food matches "${food}". Try search_my_foods / search_food, or log_food with explicit macros.`,
           });
         }
 
         const f = loggable[0];
         const r1 = (x: number) => Math.round(x * 10) / 10;
+        const qty = f.serving_qty != null ? r1((f.serving_qty as number) * n) : n;
+        const weight = f.serving_weight_g != null ? r1((f.serving_weight_g as number) * n) : undefined;
         const scaled: LogFoodArgs = {
           name: n !== 1 ? `${f.name} ×${n}` : f.name,
+          brand: f.brand ?? undefined,
           calories: Math.round((f.calories as number) * n),
           protein: f.protein != null ? r1((f.protein as number) * n) : undefined,
           carbs: f.carbs != null ? r1((f.carbs as number) * n) : undefined,
           fat: f.fat != null ? r1((f.fat as number) * n) : undefined,
+          // Custom serving when we know the grams, so MacroFactor can rescale it later.
+          serving: weight && f.serving_size ? { amount: qty, label: String(f.serving_size), weight } : "one",
+          llm_prompt,
         };
-        const payload = buildFoodPayload(scaled);
-        const r = await dispatchFood(this.env, JSON.stringify(payload), intended_time);
+        let payload: MacroFactorFood;
+        try {
+          payload = validateFoodPayload(buildFoodPayload(scaled, buildOpts()));
+        } catch (e) {
+          return invalid(e);
+        }
+        const r = await queueFoods(this.env, [payload], [intended_time]);
 
         const baseServing = `${f.serving_qty ?? 1} ${f.serving_size ?? "serving"}`.trim();
-        const effServing =
-          f.serving_qty != null
-            ? `${r1((f.serving_qty as number) * n)} ${f.serving_size ?? "serving"}`.trim()
-            : `${n}× saved serving`;
-        const macros =
-          `${scaled.calories} kcal` +
-          (scaled.protein != null ? `, ${scaled.protein}g P` : "") +
-          (scaled.carbs != null ? `, ${scaled.carbs}g C` : "") +
-          (scaled.fat != null ? `, ${scaled.fat}g F` : "");
-        return text(
-          `${foodMsg(scaled.name, r)}\n` +
-            `(${n}× "${f.name}" [saved as ${baseServing}] → ${effServing}: ${macros})`,
-        );
+        const effServing = f.serving_qty != null ? `${qty} ${f.serving_size ?? "serving"}`.trim() : `${n}× saved serving`;
+        return text({
+          status: r.status,
+          message: `${foodMsg(`"${scaled.name}"`, r)} (${n}× "${f.name}" [saved as ${baseServing}] → ${effServing}: ${macroSummary(payload.nutrients)})`,
+          queue_id: r.ids[0],
+        });
       },
     );
 
@@ -773,44 +1106,42 @@ export class MyMCP extends McpAgent<Env> {
       {
         title: "Log a recipe (multi-ingredient meal) to MacroFactor",
         description:
-          "Log a named meal as a recipe by listing its ingredients. Macros are summed across all " +
-          "ingredients and a recipe[] children array is attached so MacroFactor can show individual " +
-          "components when expanded. Logs via the existing food queue — tap the push notification on your " +
-          "iPhone to confirm. Cannot backdate (always 'now'). SAFE FALLBACK: if MacroFactor ignores recipe[] " +
-          "in Log by JSON, the parent's summed macros still log correctly.",
+          "Log a named meal as ONE entry with a recipe[] breakdown of its ingredients: the entry's nutrients are the " +
+          "sum of the ingredients and MacroFactor can show the components when expanded. Good for home-cooked meals and " +
+          "for restaurant items you built from published components (bread + meat + cheese …). Logs via the phone " +
+          "(tap to confirm), current time only.",
         inputSchema: {
           name: z.string().describe("Meal/recipe name, e.g. 'Chicken stir-fry'"),
           ingredients: z
-            .array(
-              z.object({
-                name: z.string().describe("Ingredient name"),
-                calories: z.number().finite().positive().describe("kcal for this ingredient's portion"),
-                protein: z.number().finite().nonnegative().optional().describe("grams"),
-                carbs: z.number().finite().nonnegative().optional().describe("grams"),
-                fat: z.number().finite().nonnegative().optional().describe("grams"),
-                fiber: z.number().finite().nonnegative().optional().describe("grams"),
-                sugar: z.number().finite().nonnegative().optional().describe("grams"),
-                sodium_mg: z.number().finite().nonnegative().optional().describe("milligrams"),
-                saturated_fat: z.number().finite().nonnegative().optional().describe("grams"),
-              }),
-            )
+            .array(z.object(recipeChildShape))
             .min(1)
-            .describe("Ingredients with their macros for the portion eaten"),
-          intended_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional()
-            .describe("HH:MM (24h) when the food was actually EATEN. MacroFactor always logs at tap-time; this hint corrects nutrient-timing analytics after your next food-log export."),
+            .max(30)
+            .describe("Ingredients with the nutrients of the portion eaten (flat fields or a nutrients dictionary each)"),
+          icon: foodItemShape.icon,
+          brand: foodItemShape.brand,
+          serving: foodItemShape.serving,
+          notes: foodItemShape.notes,
+          llm_prompt: foodItemShape.llm_prompt,
+          intended_time: intendedTimeField,
         },
         annotations: WRITE_HINT,
       },
-      async ({ name, ingredients, intended_time }) => {
-        const payload = buildRecipePayload(name, ingredients);
-        const r = await dispatchFood(this.env, JSON.stringify(payload), intended_time);
-        const nuts = payload.nutrients as Record<string, number>;
-        const summary =
-          `${nuts.energy} kcal` +
-          (nuts.protein != null ? `, ${nuts.protein}g P` : "") +
-          (nuts.carbs != null ? `, ${nuts.carbs}g C` : "") +
-          (nuts.fat != null ? `, ${nuts.fat}g F` : "");
-        return text(`${foodMsg(name, r)}\n(${ingredients.length} ingredients → ${summary})`);
+      async ({ name, ingredients, icon, brand, serving, notes, llm_prompt, intended_time }) => {
+        let payload: MacroFactorFood;
+        try {
+          payload = validateFoodPayload(
+            buildRecipePayload(name, ingredients as unknown as LogFoodArgs[], { icon, brand, serving, notes, llm_prompt }, buildOpts()),
+          );
+        } catch (e) {
+          return invalid(e);
+        }
+        const r = await queueFoods(this.env, [payload], [intended_time]);
+        return text({
+          status: r.status,
+          message: `${foodMsg(`"${name}"`, r)} (${ingredients.length} ingredients → ${macroSummary(payload.nutrients)})`,
+          components: payload.recipe?.map((c) => ({ name: c.name, macros: macroSummary(c.nutrients) })),
+          queue_id: r.ids[0],
+        });
       },
     );
 
@@ -823,8 +1154,7 @@ export class MyMCP extends McpAgent<Env> {
           "into a single flat entry and queues it for logging via the iPhone Shortcut. Useful for repeating " +
           "a meal you ate on a previous day. All macros (calories, protein, carbs, fat) are summed across " +
           "matching log items. The entry logs at the CURRENT time — MacroFactor has no backdate field. " +
-          "Sends a Pushcut notification; tap to confirm logging. Examples: date='2026-06-28' logs the " +
-          "entire day; add start_hour=12 end_hour=14 to isolate lunch.",
+          "Examples: date='2026-06-28' logs the entire day; add start_hour=12 end_hour=14 to isolate lunch.",
         inputSchema: {
           date: z.string().describe("YYYY-MM-DD — the date to pull the meal from (usually a past date)"),
           start_hour: z
@@ -836,8 +1166,7 @@ export class MyMCP extends McpAgent<Env> {
           meal_name: z
             .string().optional()
             .describe("Override the entry name, e.g. 'Lunch'. Auto-inferred from start_hour if omitted."),
-          intended_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional()
-            .describe("HH:MM (24h) when the food was actually EATEN. MacroFactor always logs at tap-time; this hint corrects nutrient-timing analytics after your next food-log export."),
+          intended_time: intendedTimeField,
         },
         annotations: WRITE_HINT,
       },
@@ -859,27 +1188,31 @@ export class MyMCP extends McpAgent<Env> {
 
         const label = meal_name?.trim() || inferMealLabel(isoDate, start_hour);
         const r1 = (x: number) => Math.round(x * 10) / 10;
-        const payload = buildFoodPayload({
-          name: label,
-          calories: Math.round(agg.calories),
-          protein: r1(agg.protein),
-          carbs: r1(agg.carbs),
-          fat: r1(agg.fat),
-        });
+        const payload = validateFoodPayload(
+          buildFoodPayload(
+            {
+              name: label,
+              calories: Math.round(agg.calories),
+              protein: r1(agg.protein),
+              carbs: r1(agg.carbs),
+              fat: r1(agg.fat),
+              icon: "plateQuickAdd",
+              notes: `Re-logged from ${isoDate}: ${agg.names.join(", ")}`,
+            },
+            buildOpts(),
+          ),
+        );
 
-        const r = await dispatchFood(this.env, JSON.stringify(payload), intended_time);
-        const summary = {
+        const r = await queueFoods(this.env, [payload], [intended_time]);
+        return text({
+          status: r.status,
+          message: foodMsg(`"${label}"`, r),
           entry: label,
           items_aggregated: agg.item_count,
-          totals: {
-            calories: Math.round(agg.calories),
-            protein: r1(agg.protein),
-            carbs: r1(agg.carbs),
-            fat: r1(agg.fat),
-          },
+          totals: { calories: Math.round(agg.calories), protein: r1(agg.protein), carbs: r1(agg.carbs), fat: r1(agg.fat) },
           items: agg.names,
-        };
-        return text(`${foodMsg(label, r)}\n${JSON.stringify(summary)}`);
+          queue_id: r.ids[0],
+        });
       },
     );
 
@@ -888,93 +1221,33 @@ export class MyMCP extends McpAgent<Env> {
       {
         title: "Log multiple foods to MacroFactor (batch)",
         description:
-          "Log 1–20 foods in a single phone tap — ideal for a full meal, a photo-estimated intake, " +
-          "or any multi-item log. Builds each item's MacroFactorFood payload, enqueues them as one batch " +
-          "in D1, and fires one Pushcut notification. You tap → the 'MF Log Batch' Shortcut pulls the " +
-          "array and logs each item via MacroFactor's 'Log by JSON' action. Nutrients are totals for each " +
-          "portion eaten (not per-100g). Logs at the current time — cannot backdate.",
+          "Log 1–30 foods as SEPARATE MacroFactor entries in a single phone tap — a full meal, a photo-estimated plate, " +
+          "or any multi-item log. Each item takes the same fields as log_food (flat macros or a nutrients dictionary, " +
+          "serving, icon, brand, notes, llm_prompt). Logs at the current time — cannot backdate.",
         inputSchema: {
           items: z
-            .array(
-              z.object({
-                name: z.string().describe("Food name"),
-                calories: z.number().describe("Total kcal for this portion"),
-                protein: z.number().optional().describe("g"),
-                carbs: z.number().optional().describe("g"),
-                fat: z.number().optional().describe("g"),
-                fiber: z.number().optional().describe("g"),
-                sugar: z.number().optional().describe("g"),
-                sodium_mg: z.number().optional().describe("mg"),
-                saturated_fat: z.number().optional().describe("g"),
-                brand: z.string().optional(),
-                notes: z.string().optional(),
-                alcohol_g: z.number().optional().describe("grams of ethanol (a standard drink ≈ 10g AU / 14g US)"),
-                caffeine_mg: z.number().optional().describe("milligrams"),
-                beverage: z.enum(["alcohol", "beverage"]).optional()
-                  .describe("tag drinks so MacroFactor/Apple Health track hydration & alcohol correctly"),
-                intended_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional()
-                  .describe("HH:MM (24h) when the food was actually EATEN. MacroFactor always logs at tap-time; this hint corrects nutrient-timing analytics after your next food-log export."),
-              }),
-            )
+            .array(z.object({ ...foodItemShape, intended_time: intendedTimeField }))
             .min(1)
-            .max(20)
-            .describe("Foods to log together. Each item is total nutrients for the portion eaten."),
+            .max(30)
+            .describe("Foods to log together. Each item is the nutrients for the portion eaten."),
         },
         annotations: WRITE_HINT,
       },
       async ({ items }) => {
-        const payloads = items.map((item) => {
-          (item as any).llm_prompt = `Logged via Claude MCP: ${item.name}`;
-          return buildFoodPayload(item as LogFoodArgs);
-        });
-        const itemsStr = JSON.stringify(payloads);
-        const batchId = await db.enqueueBatch(this.env.DB, itemsStr, payloads.length, Date.now());
-        for (const item of items) {
-          if (item.intended_time) {
-            await db.recordFoodIntent(this.env.DB, item.name, item.calories ?? null, item.intended_time, Date.now());
-          }
-        }
-        const names = items.map((i) => i.name);
-
-        const url = this.env.PUSHCUT_BATCH_WEBHOOK_URL;
-        const base = { batch_id: batchId, count: payloads.length, items: names };
-        if (!url) {
-          return text({
-            ...base,
-            status: "queued_only",
-            message:
-              `Queued ${payloads.length} items. Set PUSHCUT_BATCH_WEBHOOK_URL and the ` +
-              `'MF Log Batch' shortcut to log via push. Items wait at /pending-batch.`,
-          });
-        }
+        const payloads: MacroFactorFood[] = [];
         try {
-          const res = await fetch(url, { method: "POST" });
-          if (!res.ok) {
-            const body = (await res.text().catch(() => "")).slice(0, 150);
-            return text({
-              ...base,
-              status: "push_failed",
-              detail: `${res.status}: ${body}`,
-              message:
-                `Queued ${payloads.length} items, but Pushcut notification failed (${res.status}: ${body}). ` +
-                `Run 'MF Log Batch' manually to pull from /pending-batch.`,
-            });
-          }
-          return text({
-            ...base,
-            status: "sent",
-            message: `Sent ${payloads.length}-item batch to your phone. Tap the notification to log it in MacroFactor.`,
-          });
-        } catch (err) {
-          return text({
-            ...base,
-            status: "push_failed",
-            detail: String(err).slice(0, 150),
-            message:
-              `Queued ${payloads.length} items, but Pushcut notification threw (${String(err).slice(0, 150)}). ` +
-              `Run 'MF Log Batch' manually to pull from /pending-batch.`,
-          });
+          for (const item of items) payloads.push(validateFoodPayload(buildFoodPayload(item as unknown as LogFoodArgs, buildOpts())));
+        } catch (e) {
+          return invalid(e);
         }
+        const r = await queueFoods(this.env, payloads, items.map((i) => i.intended_time));
+        return text({
+          status: r.status,
+          count: payloads.length,
+          message: foodMsg(`${payloads.length} foods`, r),
+          items: payloads.map((p) => ({ name: p.name, icon: p.icon, macros: macroSummary(p.nutrients) })),
+          queue_ids: r.ids,
+        });
       },
     );
 
@@ -984,7 +1257,7 @@ export class MyMCP extends McpAgent<Env> {
         title: "Log water to MacroFactor",
         description:
           "Log a water intake amount (in MILLILITERS) to MacroFactor via the user's iPhone using " +
-          "MacroFactor's dedicated Log Water action. Sends a notification the user taps to confirm. " +
+          "MacroFactor's dedicated Log Water action (credits the hydration ring). Same tap/Shortcut as food. " +
           "Convert other units to mL before calling (1 US fl oz ≈ 30 mL, 1 cup ≈ 240 mL, 1 L = 1000 mL). " +
           "Logs at the current time (cannot backdate).",
         inputSchema: {
@@ -998,31 +1271,8 @@ export class MyMCP extends McpAgent<Env> {
           return text("Water amount must be a positive number of milliliters.");
         }
         await db.enqueueWater(this.env.DB, amount, Date.now());
-
-        const url = this.env.PUSHCUT_WATER_WEBHOOK_URL;
-        if (!url) {
-          return text(
-            `Queued ${amount} mL of water. The water push isn't set up yet — add a Pushcut "LogWater" ` +
-              `notification + the "MF Log Water" shortcut and set the PUSHCUT_WATER_WEBHOOK_URL secret ` +
-              `(see ios-setup.md). Until then it waits at /pending-water.`,
-          );
-        }
-        try {
-          const res = await fetch(url, { method: "POST" });
-          if (!res.ok) {
-            const body = (await res.text().catch(() => "")).slice(0, 150);
-            return text(
-              `Queued ${amount} mL, but the Pushcut notification failed (${res.status}: ${body}). ` +
-                `You can still run the "MF Log Water" shortcut manually to pull it from /pending-water.`,
-            );
-          }
-          return text(`Sent ${amount} mL of water to your phone. Tap the notification to log it in MacroFactor.`);
-        } catch (err) {
-          return text(
-            `Queued ${amount} mL, but the Pushcut notification threw (${String(err).slice(0, 150)}). ` +
-              `You can still run the "MF Log Water" shortcut manually to pull it from /pending-water.`,
-          );
-        }
+        const r = await notifyPhone(this.env);
+        return text({ status: r.status, message: foodMsg(`${amount} mL of water`, r) });
       },
     );
 
@@ -1032,7 +1282,7 @@ export class MyMCP extends McpAgent<Env> {
         title: "Log body weight to MacroFactor",
         description:
           "Log a body weight reading to MacroFactor via the user's iPhone using MacroFactor's dedicated " +
-          "Log Weight Shortcuts action. Sends a notification the user taps to confirm. Pass kg directly, " +
+          "Log Weight Shortcuts action. Same tap/Shortcut as food. Pass kg directly, " +
           "or pass lbs with unit='lbs' for server-side conversion (÷ 2.20462). " +
           "Logs at the current time (cannot backdate).",
         inputSchema: {
@@ -1051,31 +1301,8 @@ export class MyMCP extends McpAgent<Env> {
           return text("Weight must be a positive finite number (< 700 kg).");
         }
         await db.enqueueWeight(this.env.DB, weightKg, Date.now());
-
-        const url = this.env.PUSHCUT_WEIGHT_WEBHOOK_URL;
-        if (!url) {
-          return text(
-            `Queued ${weightKg} kg. The weight push isn't set up yet — add a Pushcut notification ` +
-              `and the "MF Log Weight" shortcut, then set the PUSHCUT_WEIGHT_WEBHOOK_URL secret ` +
-              `(see ios-setup.md). Until then it waits at /pending-weight.`,
-          );
-        }
-        try {
-          const res = await fetch(url, { method: "POST" });
-          if (!res.ok) {
-            const body = (await res.text().catch(() => "")).slice(0, 150);
-            return text(
-              `Queued ${weightKg} kg, but the Pushcut notification failed (${res.status}: ${body}). ` +
-                `You can still run the "MF Log Weight" shortcut manually to pull it from /pending-weight.`,
-            );
-          }
-          return text(`Sent ${weightKg} kg to your phone. Tap the notification to log it in MacroFactor.`);
-        } catch (err) {
-          return text(
-            `Queued ${weightKg} kg, but the Pushcut notification threw (${String(err).slice(0, 150)}). ` +
-              `You can still run the "MF Log Weight" shortcut manually to pull it from /pending-weight.`,
-          );
-        }
+        const r = await notifyPhone(this.env);
+        return text({ status: r.status, message: foodMsg(`${weightKg} kg${unit === "lbs" ? ` (${kg} lb)` : ""}`, r) });
       },
     );
 
@@ -1084,9 +1311,8 @@ export class MyMCP extends McpAgent<Env> {
       {
         title: "Queued (not-yet-confirmed) logs",
         description:
-          "Everything currently queued for the phone across all four write queues (food/water/weight/" +
-          "batch) with names and ages — i.e. logs the user has requested but NOT yet confirmed by tapping. " +
-          "Pairs with cancel_pending_log. " +
+          "Everything currently queued for the phone (food / water / weight) with names, ages and whether the phone has " +
+          "already claimed it — i.e. logs the user has requested but NOT yet confirmed by tapping. Pairs with cancel_pending_log. " +
           "recent_dispatches shows the last 24h of foods the phone pulled and whether each was confirmed landed.",
         inputSchema: {},
         annotations: READ_ONLY,
@@ -1097,14 +1323,13 @@ export class MyMCP extends McpAgent<Env> {
     this.server.registerTool(
       "cancel_pending_log",
       {
-        title: "Cancel a pending food/water/weight/batch log",
+        title: "Cancel pending food/water/weight logs",
         description:
           "Deletes queued log entries so they will NOT be sent to MacroFactor. Call this immediately " +
           "when the user says 'never mind', 'cancel', 'undo', or 'don't log that' after a " +
-          "log_food/log_water/log_weight/log_foods_batch call. Food/water/weight: clears anything queued " +
-          "and not yet tapped. Batch: also clears a batch already claimed by the Shortcut but not yet " +
-          "finished logging. The optional queue param targets a specific queue; omit it (or pass 'all') to " +
-          "clear everything. Returns counts of what was deleted. Safe to call even if the queue is empty.",
+          "log_food/log_water/log_weight/log_foods_batch call. Clears anything queued and not yet synced " +
+          "(a sync already running on the phone may still land). The optional queue param targets a specific " +
+          "queue; omit it (or pass 'all') to clear everything. Returns counts of what was deleted.",
         inputSchema: {
           queue: z
             .enum(["food", "water", "weight", "batch", "all"])
@@ -1130,7 +1355,7 @@ export class MyMCP extends McpAgent<Env> {
           cancelled: counts,
           message:
             `Cancelled ${parts.join(", ")} pending log${total > 1 ? "s" : ""}. ` +
-            `Nothing will be logged when you next tap the Pushcut notification.`,
+            `Nothing will be logged on the next MF Sync.`,
         });
       },
     );
@@ -1366,6 +1591,87 @@ async function handleToday(request: Request, env: Env): Promise<Response> {
   });
 }
 
+// GET /pending-all?token=<INGEST_SECRET>
+// The "MF Sync" Shortcut's single fetch. Claims every queued food / water / weight row and returns
+//   { claim, count, foods: [MacroFactorFood...], water: [mL...], weight: [kg...] }
+// Always 200 with (possibly empty) arrays so the Shortcut's Repeat loops are simply no-ops.
+// Rows stay claimed until POST /sync-ack echoes `claim`; unacked claims are re-served after 10 min.
+async function handlePendingAll(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "GET") return json({ error: "GET only" }, 405);
+  const url = new URL(request.url);
+  const token = url.searchParams.get("token");
+  if (!env.INGEST_SECRET || token !== env.INGEST_SECRET) return json({ error: "unauthorized" }, 401);
+  const c = await db.claimAllPending(env.DB);
+  const foods: unknown[] = [];
+  for (const f of c.foods) {
+    try {
+      const p = JSON.parse(f.payload);
+      if (p && typeof p === "object") {
+        delete p._pending_id;
+        foods.push(p);
+      }
+    } catch {
+      // a corrupt row must not break the whole sync; it is dropped on ack
+    }
+  }
+  return json({
+    claim: c.claim,
+    count: foods.length + c.water.length + c.weight.length,
+    foods,
+    water: c.water.map((w) => w.ml),
+    weight: c.weight.map((w) => parseFloat(Number(w.kg).toFixed(3))),
+  });
+}
+
+// POST /sync-ack?token=<INGEST_SECRET>&claim=<ms>[&date=YYYY-MM-DD]
+// Body (optional): the MacroFactorTodaySummary returned by the last Log by JSON / Log Water /
+// Log Weight action — {consumed, remaining}. Deletes the claimed rows, marks the food dispatches
+// landed, and refreshes the live today row from the summary.
+async function handleSyncAck(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") return json({ error: "POST only" }, 405);
+  const url = new URL(request.url);
+  const token = request.headers.get("x-ingest-secret") || url.searchParams.get("token");
+  if (!env.INGEST_SECRET || token !== env.INGEST_SECRET) return json({ error: "unauthorized" }, 401);
+
+  const claimRaw = url.searchParams.get("claim");
+  const claim = claimRaw != null ? parseInt(claimRaw, 10) : NaN;
+  const acked = Number.isFinite(claim) && claim > 0 ? await db.ackClaim(env.DB, claim, Date.now()) : null;
+
+  // Tolerant body parse — Shortcuts may send JSON, a JSON string, a multipart file, or nothing.
+  let raw = "";
+  let payload: any = null;
+  try {
+    const ctype = request.headers.get("content-type") || "";
+    if (ctype.includes("multipart/form-data")) {
+      const form = await request.formData();
+      for (const v of form.values()) {
+        raw = typeof v === "string" ? v : await (v as File).text();
+        break;
+      }
+    } else {
+      raw = await request.text();
+    }
+    if (raw.trim()) payload = JSON.parse(raw);
+    if (typeof payload === "string") payload = JSON.parse(payload); // double-encoded by Shortcuts
+  } catch {
+    payload = null;
+  }
+
+  let today: unknown = null;
+  if (payload && typeof payload === "object" && payload.consumed && typeof payload.consumed === "object") {
+    const date = validIsoDate(url.searchParams.get("date")) || db.todayLocal();
+    const ex = db.extractTodaySummary(payload);
+    await db.upsertToday(env.DB, date, ex, raw, Date.now(), "mf-sync");
+    today = { date, consumed: { calories: ex.calories, protein: ex.protein, carbs: ex.carbs, fat: ex.fat }, had_remaining: !!ex.remaining };
+  }
+  return json({
+    ok: true,
+    ...(acked ? { acked } : { acked: null, note: claimRaw ? "unknown claim" : "no claim given" }),
+    today,
+    ...(payload == null && raw.trim() ? { body_ignored: raw.slice(0, 120) } : {}),
+  });
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     // Every endpoint is hit by unattended callers (iOS Shortcuts, Pushcut, the connector) — an
@@ -1385,6 +1691,7 @@ export default {
 };
 
 async function route(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  db.setUserTz(env.USER_TZ);
   const url = new URL(request.url);
 
   if (url.pathname === "/ingest") return handleIngest(request, env);
@@ -1421,6 +1728,8 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     return doResp;
   }
   if (url.pathname === "/today") return handleToday(request, env);
+  if (url.pathname === "/pending-all") return handlePendingAll(request, env);
+  if (url.pathname === "/sync-ack") return handleSyncAck(request, env);
   if (url.pathname === "/pending") return handlePending(request, env);
   if (url.pathname === "/pending-water") return handlePendingWater(request, env);
   if (url.pathname === "/pending-weight") return handlePendingWeight(request, env);
@@ -1450,8 +1759,8 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
 
   return new Response(
     "MacroFactor MCP server.\nEndpoints: /mcp (connector), /upload-export (export refresh), " +
-      "/today (live today feed), /pending (food queue), /pending-water (water queue), " +
-      "/pending-weight (weight queue), /pending-batch + /ack-batch (batch queue), " +
+      "/pending-all + /sync-ack (MF Sync Shortcut), /today (live today feed), " +
+      "/pending, /pending-water, /pending-weight, /pending-batch + /ack-batch (legacy per-type queues), " +
       "/cancel-pending (clear queues), /health\n",
     { status: 404 },
   );

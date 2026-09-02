@@ -72,19 +72,22 @@ CREATE TABLE IF NOT EXISTS today_summary (
   source     TEXT
 );
 
--- Outgoing log_food requests waiting for the iPhone Shortcut to pull from GET /pending.
+-- Outgoing food logs waiting for the iPhone "MF Sync" Shortcut (GET /pending-all claims them,
+-- POST /sync-ack deletes them). claimed_at = unix ms of the claim; NULL = unclaimed; claims older
+-- than 10 min are re-served. The legacy GET /pending pops one row directly.
 CREATE TABLE IF NOT EXISTS pending_food (
-  id      INTEGER PRIMARY KEY AUTOINCREMENT,
-  created INTEGER NOT NULL,         -- unix ms
-  payload TEXT NOT NULL            -- MacroFactorFood JSON string
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  created    INTEGER NOT NULL,      -- unix ms
+  payload    TEXT NOT NULL,         -- MacroFactorFood JSON string
+  claimed_at INTEGER                -- unix ms; NULL = unclaimed
 );
 
--- Outgoing log_water requests waiting for the "MF Log Water" Shortcut to pull from
--- GET /pending-water (bare mL number → MacroFactor's dedicated "Log Water" action).
+-- Outgoing log_water requests (mL → MacroFactor's dedicated "Log Water" action via MF Sync).
 CREATE TABLE IF NOT EXISTS pending_water (
-  id      INTEGER PRIMARY KEY AUTOINCREMENT,
-  created INTEGER NOT NULL,         -- unix ms
-  ml      INTEGER NOT NULL         -- amount in milliliters (always rounded to a whole number)
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  created    INTEGER NOT NULL,      -- unix ms
+  ml         INTEGER NOT NULL,      -- amount in milliliters (always rounded to a whole number)
+  claimed_at INTEGER                -- unix ms; NULL = unclaimed
 );
 
 -- Nutrition program targets (from the workbook's "Nutrition Program Settings" sheet).
@@ -179,12 +182,12 @@ CREATE TABLE IF NOT EXISTS training_programs (
 
 -- ===== Enhancement tables (2026-07-01) =====
 
--- Outgoing log_weight requests waiting for the "MF Log Weight" Shortcut to pull from
--- GET /pending-weight (bare kg REAL -> MacroFactor's confirmed "Log Weight" action).
+-- Outgoing log_weight requests (kg → MacroFactor's dedicated "Log Weight" action via MF Sync).
 CREATE TABLE IF NOT EXISTS pending_weight (
-  id      INTEGER PRIMARY KEY AUTOINCREMENT,
-  created INTEGER NOT NULL,          -- unix ms
-  kg      REAL NOT NULL              -- weight in kilograms (3 decimal places, e.g. 75.456)
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  created    INTEGER NOT NULL,      -- unix ms
+  kg         REAL NOT NULL,         -- weight in kilograms (3 decimal places, e.g. 75.456)
+  claimed_at INTEGER                -- unix ms; NULL = unclaimed
 );
 
 -- Outgoing log_foods_batch requests. One row per batch. Items are a JSON array of

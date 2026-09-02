@@ -1,0 +1,4 @@
+INGEST_SECRET=dev-ingest-secret
+MCP_TOKEN=dev-mcp-token
+# USDA_API_KEY=your-key
+# PUSHCUT_WEBHOOK_URL=https://api.pushcut.io/<secret>/notifications/MacroFactor

@@ -2,7 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "macrofactor-mcp",
   "main": "src/index.ts",
-  "compatibility_date": "2025-03-10",
+  "compatibility_date": "2026-08-23",
   "compatibility_flags": ["nodejs_compat"],
 
   // The MCP server runs inside this Durable Object (provided by the `agents` package).
@@ -23,18 +23,24 @@
     {
       "binding": "DB",
       "database_name": "macrofactor",
-      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+      "database_id": "6f776719-c85a-4259-8e1b-0a17c9994b75"
     }
   ],
 
+  // Plain (non-secret) configuration.
+  "vars": {
+    // IANA timezone that defines "today" for the live feed and intended-time matching.
+    "USER_TZ": "America/Los_Angeles",
+    // Stable `source` identifier stamped on every Log by JSON payload (MacroFactor asks for one).
+    "MF_SOURCE": "claude-macrofactor-mcp"
+  },
+
   // Secrets (set via `npx wrangler secret put NAME`, do NOT put them here):
-  //   INGEST_SECRET              - shared secret for /today, /upload-export, /pending*, /ingest
-  //   MCP_TOKEN                  - (optional) makes the MCP URL capability-style /mcp/<token>
-  //   PUSHCUT_WEBHOOK_URL        - (optional) Pushcut webhook for food log notifications
-  //   PUSHCUT_WATER_WEBHOOK_URL  - (optional) Pushcut webhook for water log notifications
-  //   PUSHCUT_WEIGHT_WEBHOOK_URL - (optional) Pushcut webhook for weight log notifications
-  //   PUSHCUT_BATCH_WEBHOOK_URL  - (optional) Pushcut webhook for batch food logging
-  //   PUSHCUT_PR_WEBHOOK_URL     - (optional) Pushcut webhook for "new PR" alerts
+  //   INGEST_SECRET          - shared secret for the phone/PC endpoints (/pending-all, /sync-ack, /today, /upload-export, ...)
+  //   MCP_TOKEN              - (recommended) makes the MCP URL capability-style /mcp/<token>
+  //   PUSHCUT_WEBHOOK_URL    - (optional) Pushcut webhook that pings the phone to run the "MF Sync" Shortcut
+  //   PUSHCUT_PR_WEBHOOK_URL - (optional) Pushcut webhook for "new PR" alerts
+  //   USDA_API_KEY           - (optional but recommended) free key from fdc.nal.usda.gov/api-key-signup; DEMO_KEY (30 req/h) otherwise
 
   // Daily 08:00 UTC fallback for the PR-achievement check (primary trigger is /upload-export).
   "triggers": { "crons": ["0 8 * * *"] },

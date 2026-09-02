@@ -1,9 +1,11 @@
 {
   "name": "macrofactor-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "license": "MIT",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "type": "module",
   "scripts": {
     "deploy": "wrangler deploy",
@@ -13,7 +15,9 @@
     "ingest": "node scripts/ingest.mjs",
     "cf-typegen": "wrangler types",
     "type-check": "tsc --noEmit",
-    "doc-drift": "node scripts/doc-drift.mjs"
+    "doc-drift": "node scripts/doc-drift.mjs",
+    "test": "vitest run",
+    "db:migrate": "wrangler d1 execute macrofactor --file=./migrations/0001_claims.sql --remote"
   },
   "dependencies": {
     "agents": "^0.17.1",
@@ -21,8 +25,9 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250310.0",
-    "typescript": "^5.6.0",
-    "wrangler": "^4.105.0"
+    "@cloudflare/workers-types": "^5.20260902.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.128.0"
   }
 }
