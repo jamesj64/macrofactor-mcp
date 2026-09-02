@@ -1551,19 +1551,25 @@ async function handleToday(request: Request, env: Env): Promise<Response> {
   };
   // Any MacroFactor nutrient key works as a query param (energy, protein, …, vitaminD), plus the
   // aliases calories→energy, sugar→sugars, sodium_mg→sodium, saturated_fat→saturatedFat.
+  // rem_<key>=<n> carries "Remaining to Goal" so the day's targets are captured too.
   const qConsumed: Record<string, number> = {};
+  const qRemaining: Record<string, { target: number }> = {};
   const ALIAS: Record<string, string> = { calories: "energy", sugar: "sugars", sodium_mg: "sodium", saturated_fat: "saturatedFat", caffeine_mg: "caffeine", alcohol_g: "alcohol" };
   for (const [param, raw] of q.entries()) {
-    const key = ALIAS[param] ?? param;
+    const isRem = param.startsWith("rem_");
+    const bare = isRem ? param.slice(4) : param;
+    const key = ALIAS[bare] ?? bare;
     if (!isNutrientKey(key)) continue;
     const n = qnum(raw);
-    if (n != null) qConsumed[key] = n;
+    if (n == null) continue;
+    if (isRem) qRemaining[key] = { target: n };
+    else qConsumed[key] = n;
   }
 
   let raw = "";
   let payload: any;
   if (Object.keys(qConsumed).length) {
-    payload = { consumed: qConsumed };
+    payload = { consumed: qConsumed, ...(Object.keys(qRemaining).length ? { remaining: qRemaining } : {}) };
     raw = JSON.stringify(payload);
   } else {
     // Tolerant body parse — Shortcuts may send JSON, a JSON string, or a multipart file.

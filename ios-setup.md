@@ -105,34 +105,62 @@ Repeat for each export you want refreshed. From a computer, `npm run ingest -- f
 
 ## Shortcut 3 — "MF Nightly" (optional: history without exports)
 
-Runs itself every night (Automation → Time of Day → 11:50 PM → Run Immediately → MF Nightly) and
-pushes two things so the export is only needed occasionally:
+Runs itself every night (Automation → Time of Day → **11:50 PM** → Run Immediately → MF Nightly) and
+pushes the day's totals and the day's foods, so the export is only needed occasionally.
 
-**A. Today's totals** — MacroFactor's **Get Nutrition State** action returns one number per call, so add
-one per nutrient you care about (Calculation **Consumed**): Calories, Protein, Carbs, Fat, Fiber, Sugar,
-Sodium, Saturated Fat, … Then **Get Contents of URL**, POST, header `x-ingest-secret`, and put the values
-into the URL as query params (type the URL, then insert each variable after its `=`):
+MacroFactor exposes two read actions: **Get Nutrition State** (one nutrient per call — Calculation
+*Consumed*, *Remaining to Goal*, *Remaining to Minimum* or *Remaining to Maximum*) and **Find Recent Food**,
+whose results carry Name, Brand, Time Last Consumed, Consumption Count, Hours Consumed (24 hr), and every
+nutrient (Energy, Protein (g), … Zinc (mg)).
+
+**Part A — today's totals**
+
+1. Add one **Get Nutrition State** per nutrient, Calculation **Consumed**: Calories, Protein, Carbs, Fat,
+   then any micros you care about (Fiber, Sugars, Saturated Fat, Sodium, Potassium, Calcium, Iron,
+   Magnesium, Vitamin D, Water, Alcohol, Caffeine…). Leave *from JSON* empty so it reads today's live state.
+2. Optionally add **Get Nutrition State** with Calculation **Remaining to Goal** for Calories / Protein /
+   Carbs / Fat — this captures the day's targets.
+3. **Get Contents of URL** — POST, header `x-ingest-secret` = `<INGEST_SECRET>`, no body. Type the URL and
+   insert each result variable after its `=` (param names are MacroFactor's nutrient keys; `rem_` prefix =
+   Remaining to Goal):
 
 ```
-https://macrofactor-mcp.<your-subdomain>.workers.dev/today?energy=[Calories]&protein=[Protein]&carbs=[Carbs]&fat=[Fat]&fiber=[Fiber]&sugars=[Sugar]&sodium=[Sodium]&saturatedFat=[SatFat]
+https://macrofactor-mcp.<your-subdomain>.workers.dev/today?energy=[Calories]&protein=[Protein]&carbs=[Carbs]&fat=[Fat]&fiber=[Fiber]&sugars=[Sugars]&saturatedFat=[SatFat]&sodium=[Sodium]&potassium=[Potassium]&calcium=[Calcium]&iron=[Iron]&magnesium=[Magnesium]&vitaminD=[VitD]&water=[Water]&rem_energy=[CalRem]&rem_protein=[ProRem]
 ```
 
-Any MacroFactor nutrient key works as a param (`potassium`, `vitaminD`, `water`, …). The server fills
-the `days` and `micronutrients` tables for that date (tagged live; a later export replaces them).
+Keys: energy, protein, carbs, fat, fiber, sugars, sugarsAdded, starch, saturatedFat, transFat,
+monounsaturatedFat, polyunsaturatedFat, omega3, omega6, cholesterol, choline, alcohol, caffeine, water,
+sodium, potassium, calcium, iron, magnesium, manganese, phosphorus, zinc, copper, selenium, folate,
+vitaminA, vitaminB1, vitaminB2, vitaminB3, vitaminB5, vitaminB6, vitaminB12, vitaminC, vitaminD, vitaminE,
+vitaminK (plus the amino acids). The server writes the `days` and `micronutrients` rows for that date
+(tagged live; a later export replaces them).
 
-**B. Today's foods** — **Find Recent Food** where *Time Last Consumed is after* **Start of Today** and
-*before* **Now** (sort by Time Last Consumed). Then post the list to:
+**Part B — today's foods**
+
+4. **Find Recent Food** — Add Filter: **Time Last Consumed** *is in the last* **24 hours**. Sort by Time
+   Last Consumed. Limit off.
+5. **Repeat with Each** ← Recent Food. Inside the loop add ONE **Text** action containing the Repeat Item's
+   properties separated by `|`, in exactly this order (tap the variable → pick the property):
+
+```
+[Name]|[Brand]|[Time Last Consumed]|[Consumption Count]|[Energy]|[Protein (g)]|[Carbs (g)]|[Fat (g)]|[Hours Consumed (24 hr)]
+```
+
+   Hours Consumed is a list and goes last: if Shortcuts spreads it over extra lines, the server folds
+   those into the food above. **End Repeat.**
+6. **Combine Text** ← Repeat Results, with **New Lines**.
+7. **Get Contents of URL** — POST, Request Body **File** ← Combined Text:
 
 ```
 https://macrofactor-mcp.<your-subdomain>.workers.dev/foods-seen?token=<INGEST_SECRET>
 ```
 
-Method POST, Request Body **File** ← the Find Recent Food result (or a **Dictionary**/list you build from
-its properties: `name`, `Time Last Consumed`, `calories`, `protein`, `carbs`, `fat`). The endpoint accepts a
-JSON array, `{items:[…]}`, or plain text with one name per line, and echoes how it interpreted the body
-(`shape`, `sample`, `unrecognized_keys`). Add `&dry_run=1` while wiring it up to see the parse without
-storing. Note MacroFactor's "Recent Food" is a distinct-food list (a food eaten twice in the window
-appears once), so treat this feed as "what I ate", not an exact item count.
+   Append `&dry_run=1` the first time and add **Show Notification** ← Contents of URL to check the parse
+   (`shape`, `sample`, `unrecognized_keys`) without storing; then remove it. A JSON array of dictionaries
+   or `{items:[…]}` is accepted too.
+
+The server turns each food into one `food_log` row per consumption (Consumption Count × Hours Consumed,
+the last one at Time Last Consumed) tagged `shortcut`; an export's Food Log CSV replaces them.
 
 **Still export-only:** MacroFactor's expenditure (TDEE) and trend weight, your saved-foods library,
 workouts and training aggregates. A monthly export covers those.

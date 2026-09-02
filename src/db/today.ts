@@ -235,6 +235,15 @@ const MACRO_KEYS: Record<string, string[]> = {
   fat: ["fat", "Fat", "Fat (g)"],
 };
 
+// Pipe-delimited line format for the MF Nightly Shortcut (one Text action per Recent Food, with the
+// entity's properties inserted in this order; trailing fields may be omitted):
+// "Hours Consumed (24 hr)" is a LIST property; Shortcuts joins list items with newlines when it
+// inserts them into Text, so it goes last and bare numeric lines are folded into the previous food.
+export const FOOD_LINE_FIELDS = [
+  "Name", "Brand", "Time Last Consumed", "Consumption Count", "Energy", "Protein (g)", "Carbs (g)", "Fat (g)",
+  "Hours Consumed (24 hr)",
+] as const;
+
 function firstKey(obj: Record<string, unknown>, keys: string[]): unknown {
   for (const k of keys) if (obj[k] != null && obj[k] !== "") return obj[k];
   return undefined;
@@ -262,45 +271,117 @@ export function toLocalHHMM(v: unknown): string | null {
   return null;
 }
 
+const numOrNull = (v: unknown): number | null => {
+  if (v == null || v === "") return null;
+  const n = parseFloat(String(v).replace(/[^0-9.\-]/g, ""));
+  return Number.isFinite(n) ? n : null;
+};
+
+// "8, 13" / "8 13" / "[8,13]" → [8, 13]
+function parseHours(v: unknown): number[] {
+  if (v == null) return [];
+  const src = Array.isArray(v) ? v.map(String).join(",") : String(v);
+  return (src.match(/\d{1,2}/g) ?? []).map((x) => parseInt(x, 10)).filter((h) => h >= 0 && h <= 23);
+}
+
+// One Recent Food → 1..N food_log rows (one per consumption). The last consumption gets the exact
+// Time Last Consumed; earlier ones get HH:00 from Hours Consumed; extra count beyond known hours
+// reuses the last known time.
+function expandFood(f: {
+  name: string; brand?: string | null; time: string | null; count: number | null; hours: number[];
+  calories: number | null; protein: number | null; carbs: number | null; fat: number | null;
+  serving_size?: string | null; serving_qty?: number | null; serving_weight_g?: number | null;
+}): any[] {
+  const base = {
+    name: f.brand ? `${f.name} (${f.brand})` : f.name,
+    serving_size: f.serving_size ?? null, serving_qty: f.serving_qty ?? null, serving_weight_g: f.serving_weight_g ?? null,
+    calories: f.calories, protein: f.protein, carbs: f.carbs, fat: f.fat,
+  };
+  const n = Math.max(1, Math.min(f.count ?? 1, 20));
+  if (n === 1) return [{ ...base, time: f.time }];
+  const lastHour = f.time ? parseInt(f.time.slice(0, 2), 10) : null;
+  const hours = [...new Set(f.hours)].filter((h) => h !== lastHour).sort((a, b) => a - b);
+  const times: string[] = hours.map((h) => `${String(h).padStart(2, "0")}:00`);
+  while (times.length < n - 1) times.push(f.time ?? (times[times.length - 1] ?? "12:00"));
+  const rows: any[] = times.slice(0, n - 1).map((t) => ({ ...base, time: t }));
+  rows.push({ ...base, time: f.time });
+  return rows.sort((a, b) => String(a.time ?? "").localeCompare(String(b.time ?? "")));
+}
+
+function fromObject(o: Record<string, unknown>): any[] | null {
+  const nutrients = (o.nutrients && typeof o.nutrients === "object" ? o.nutrients : {}) as Record<string, unknown>;
+  const name = firstKey(o, NAME_KEYS);
+  if (!name) return null;
+  const g = (macro: string) => numOrNull(firstKey(o, MACRO_KEYS[macro]) ?? (macro === "calories" ? nutrients.energy : nutrients[macro]));
+  const serving = o.serving ?? o.Serving ?? o.serving_size ?? o["Serving Size"];
+  return expandFood({
+    name: String(name).trim(),
+    brand: (firstKey(o, ["brand", "Brand"]) as string | undefined) ?? null,
+    time: toLocalHHMM(firstKey(o, TIME_KEYS)),
+    count: numOrNull(firstKey(o, ["count", "Count", "Consumption Count", "consumption_count", "consumptionCount"])),
+    hours: parseHours(firstKey(o, ["hours", "Hours", "Hours Consumed (24 hr)", "Hours Consumed", "hours_consumed", "hoursConsumed"])),
+    calories: g("calories"), protein: g("protein"), carbs: g("carbs"), fat: g("fat"),
+    serving_size: serving == null ? null : typeof serving === "string" ? serving : JSON.stringify(serving),
+    serving_qty: numOrNull(o.serving_qty ?? o["Serving Qty"]),
+    serving_weight_g: numOrNull(o.serving_weight_g ?? o["Serving Weight (g)"] ?? o.weight),
+  });
+}
+
+interface LineFood {
+  name: string; brand: string | null; time: string | null; count: number | null; hours: number[];
+  calories: number | null; protein: number | null; carbs: number | null; fat: number | null;
+}
+
+function fromLine(line: string): LineFood | null {
+  const parts = line.split("|").map((p) => p.trim());
+  if (!parts[0]) return null;
+  const [name, brand, time, count, energy, protein, carbs, fat, ...rest] = parts;
+  return {
+    name, brand: brand || null, time: toLocalHHMM(time), count: numOrNull(count), hours: parseHours(rest.join(",")),
+    calories: numOrNull(energy), protein: numOrNull(protein), carbs: numOrNull(carbs), fat: numOrNull(fat),
+  };
+}
+
+// Text-lines body → foods. A line with no "|" that is only numbers/commas continues the previous
+// food's Hours Consumed list (Shortcuts splits list properties onto their own lines).
+function fromLines(lines: string[]): any[] {
+  const foods: LineFood[] = [];
+  for (const line of lines) {
+    if (!line.includes("|") && /^[\d,\s]+$/.test(line) && foods.length) {
+      foods[foods.length - 1].hours.push(...parseHours(line));
+      continue;
+    }
+    const f = fromLine(line);
+    if (f) foods.push(f);
+  }
+  return foods.flatMap((f) => expandFood(f));
+}
+
 export function parseFoodsSeen(body: unknown): { rows: any[]; unrecognized: string[]; shape: string } {
   let list: unknown[] = [];
   let shape = "unknown";
+  const textLines = (t: string) => t.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   if (Array.isArray(body)) { list = body; shape = "array"; }
+  else if (typeof body === "string") { list = textLines(body); shape = "text-lines"; }
   else if (body && typeof body === "object") {
     const o = body as Record<string, unknown>;
     const inner = (o.items ?? o.foods ?? o.results ?? o.value) as unknown;
+    const txt = (o.lines ?? o.text ?? o.body) as unknown;
     if (Array.isArray(inner)) { list = inner; shape = "wrapped-array"; }
+    else if (typeof txt === "string") { list = textLines(txt); shape = "wrapped-text"; }
     else if (Object.keys(o).length && Object.values(o).every((v) => v && typeof v === "object")) { list = Object.values(o); shape = "object-of-objects"; }
     else { list = [o]; shape = "single-object"; }
-  } else if (typeof body === "string") {
-    list = body.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((l) => ({ name: l }));
-    shape = "text-lines";
   }
   const unrecognized = new Set<string>();
   const rows: any[] = [];
+  const strings = list.filter((x): x is string => typeof x === "string");
+  if (strings.length) rows.push(...fromLines(strings));
   for (const it of list) {
-    if (typeof it === "string") { rows.push({ name: it }); continue; }
+    if (typeof it === "string") continue;
     if (!it || typeof it !== "object") continue;
-    const o = it as Record<string, unknown>;
-    const nutrients = (o.nutrients && typeof o.nutrients === "object" ? o.nutrients : {}) as Record<string, unknown>;
-    const name = firstKey(o, NAME_KEYS);
-    if (!name) { for (const k of Object.keys(o)) unrecognized.add(k); continue; }
-    const g = (macro: string) => {
-      const v = firstKey(o, MACRO_KEYS[macro]) ?? (macro === "calories" ? nutrients.energy : nutrients[macro]);
-      return pickNum({ v }, "v");
-    };
-    const serving = o.serving ?? o.Serving ?? o.serving_size ?? o["Serving Size"];
-    rows.push({
-      name: String(name).trim(),
-      time: toLocalHHMM(firstKey(o, TIME_KEYS)),
-      serving_size: serving == null ? null : typeof serving === "string" ? serving : JSON.stringify(serving),
-      serving_qty: pickNum(o, "serving_qty") ?? pickNum(o, "Serving Qty"),
-      serving_weight_g: pickNum(o, "serving_weight_g") ?? pickNum(o, "Serving Weight (g)") ?? pickNum(o, "weight"),
-      calories: g("calories"), protein: g("protein"), carbs: g("carbs"), fat: g("fat"),
-    });
-    for (const k of Object.keys(o)) {
-      if (![...NAME_KEYS, ...TIME_KEYS, ...Object.values(MACRO_KEYS).flat(), "nutrients", "serving", "Serving", "serving_size", "Serving Size", "serving_qty", "serving_weight_g", "brand", "Brand", "icon", "source"].includes(k)) unrecognized.add(k);
-    }
+    const r = fromObject(it as Record<string, unknown>);
+    if (!r) { for (const k of Object.keys(it as object)) unrecognized.add(k); continue; }
+    rows.push(...r);
   }
   return { rows, unrecognized: [...unrecognized], shape };
 }
