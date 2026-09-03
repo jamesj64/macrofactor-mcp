@@ -42,6 +42,13 @@ agent → log_food / log_foods_batch → Worker queue + Pushcut "MacroFactor" �
 
 > **Gotchas:** never rename Shortcut variables and never set a variable's Type to **URL**. Type URLs
 > directly into the action. Repeat loops over an empty list are simply skipped.
+>
+> In steps 3–4 the **Key** field must contain only the plain text `claim` / `foods` — no variable
+> token. If the action reads `Get Value for claim [Dictionary] in [Dictionary]`, the Dictionary
+> variable was dropped into the Key field (easy to do while wiring the "in" input) and MF Sync fails
+> with *"no value was found for dictionary key 'claim{"foods":[…'"*. Tap the Key field, delete the
+> token so it reads just `claim`, and run again — the claimed foods are re-served automatically after
+> 10 minutes, so nothing queued is lost.
 
 ---
 
