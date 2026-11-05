@@ -16,6 +16,7 @@ class Stmt {
 beforeEach(() => {
   sql = new DatabaseSync(':memory:');
   sql.exec(readFileSync(new URL('../migrations/0004_gmail_oauth.sql', import.meta.url), 'utf8'));
+  sql.exec(readFileSync(new URL('../migrations/0005_gmail_setup_codes.sql', import.meta.url), 'utf8'));
   env = {
     DB: { prepare: (q: string) => new Stmt(q), batch: async (ss: Stmt[]) => {
       sql.exec('BEGIN'); try { const rows = ss.map(s => s.allSync()); sql.exec('COMMIT'); return rows; }
@@ -77,4 +78,55 @@ it('rejects a different Google account without saving its token', async () => {
   const { cookie, callback } = await start();
   expect((await handleGmailOAuth(new Request(callback, { headers: { Cookie: cookie } }), env, google('wrong@example.com') as any)).status).toBe(403);
   expect(sql.prepare('SELECT count(*) n FROM gmail_oauth_tokens').get()!.n).toBe(0);
+});
+
+async function provisionSetup(code: string, expires = Date.now() + 600_000) {
+  const hash = Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(code))).toString('base64url');
+  sql.prepare('INSERT INTO gmail_oauth_setup_codes VALUES (?,?,?)').run(hash, expires - 600_000, expires);
+}
+function setupRequest(code: string, origin = 'https://bridge.example') {
+  return new Request('https://bridge.example/oauth/gmail/start', {
+    method: 'POST', headers: { 'x-gmail-setup-code': code, Origin: origin },
+  });
+}
+it('accepts a setup code only once under concurrent starts without the ingest key', async () => {
+  const code = 'a'.repeat(43);
+  await provisionSetup(code);
+  const responses = await Promise.all([handleGmailOAuth(setupRequest(code), env), handleGmailOAuth(setupRequest(code), env)]);
+  expect(responses.map(r => r.status).sort()).toEqual([200, 401]);
+  expect(sql.prepare('SELECT count(*) n FROM gmail_oauth_setup_codes').get()!.n).toBe(0);
+});
+it('rejects wrong, expired and overlong grants; cross-origin start does not consume code', async () => {
+  const code = 'b'.repeat(43);
+  await provisionSetup(code);
+  expect((await handleGmailOAuth(setupRequest('c'.repeat(43)), env)).status).toBe(401);
+  expect((await handleGmailOAuth(setupRequest(code, 'https://evil.example'), env)).status).toBe(403);
+  expect(sql.prepare('SELECT count(*) n FROM gmail_oauth_setup_codes').get()!.n).toBe(1);
+  sql.prepare('UPDATE gmail_oauth_setup_codes SET issued_at=?, expires_at=?').run(Date.now() - 600_001, Date.now() - 1);
+  expect((await handleGmailOAuth(setupRequest(code), env)).status).toBe(401);
+  expect(() => sql.prepare('UPDATE gmail_oauth_setup_codes SET expires_at=?').run(Date.now() + 3600_000)).toThrow();
+  sql.prepare('UPDATE gmail_oauth_setup_codes SET issued_at=?, expires_at=?').run(Date.now() + 600_000, Date.now() + 900_000);
+  expect((await handleGmailOAuth(setupRequest(code), env)).status).toBe(401);
+});
+
+it('rejects malformed credentials and query strings without consuming a valid code', async () => {
+  const code = 'd'.repeat(43);
+  await provisionSetup(code);
+  for (const malformed of ['', 'short', 'x'.repeat(44), '!'.repeat(43)]) {
+    expect((await handleGmailOAuth(setupRequest(malformed), env)).status).toBe(401);
+  }
+  const request = setupRequest(code);
+  expect((await handleGmailOAuth(new Request(request.url + '?code=forbidden', request), env)).status).toBe(403);
+  expect(sql.prepare('SELECT count(*) n FROM gmail_oauth_setup_codes').get()!.n).toBe(1);
+});
+it('consumes the setup code even if subsequent state storage fails', async () => {
+  const code = 'e'.repeat(43);
+  await provisionSetup(code);
+  env.DB.batch = async () => { throw new Error('unavailable'); };
+  expect((await handleGmailOAuth(setupRequest(code), env)).status).toBe(503);
+  expect((await handleGmailOAuth(setupRequest(code), env)).status).toBe(401);
+});
+it('keeps legacy ingest authentication independent of the setup code table', async () => {
+  sql.exec('DROP TABLE gmail_oauth_setup_codes');
+  await start();
 });

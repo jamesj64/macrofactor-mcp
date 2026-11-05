@@ -114,9 +114,9 @@ export async function handleGmailOAuth(request: Request, env: GmailOAuthEnv, fet
     if (url.search) return result({ error: 'query_parameters_not_allowed' }, 400);
     const nonce = random();
     return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect Gmail</title></head>
-<body><main><h1>Connect Gmail</h1><p>Enter the current bridge ingest key, then continue to Google in this browser.</p>
+<body><main><h1>Connect Gmail</h1><p>Enter your single-use Gmail setup code, then continue to Google in this browser.</p>
 <p>Google will request Gmail read, send, and modify access. The bridge uses this to send wake emails and move its own sent wake copies to Trash.</p>
-<form id="connect" method="post" action="/oauth/gmail/setup" autocomplete="off"><label for="key">Bridge ingest key</label>
+<form id="connect" method="post" action="/oauth/gmail/setup" autocomplete="off"><label for="key">Gmail setup code</label>
 <input id="key" type="password" required autocomplete="off" autocapitalize="none" spellcheck="false"><button id="submit" type="submit">Continue to Google</button></form>
 <p id="status" role="status" aria-live="polite"></p></main>
 <script nonce="${nonce}">
@@ -131,7 +131,7 @@ form.addEventListener('submit', async event => {
   button.disabled = true;
   status.textContent = 'Starting secure connection…';
   try {
-    const pending = fetch('/oauth/gmail/start', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'x-ingest-secret': key } });
+    const pending = fetch('/oauth/gmail/start', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'x-gmail-setup-code': key } });
     key = '';
     const response = await pending;
     if (!response.ok) throw new Error('start failed');
@@ -140,7 +140,7 @@ form.addEventListener('submit', async event => {
     if (target.origin !== 'https://accounts.google.com' || target.pathname !== '/o/oauth2/v2/auth') throw new Error('invalid destination');
     location.assign(target.href);
   } catch {
-    status.textContent = 'Could not start. Check the ingest key and bridge configuration, then try again.';
+    status.textContent = 'Could not start. Check the setup code and bridge configuration, then try again.';
     button.disabled = false;
   } finally { key = ''; input.value = ''; }
 });
@@ -150,10 +150,21 @@ form.addEventListener('submit', async event => {
   }
   if (url.pathname === '/oauth/gmail/start') {
     if (request.method !== 'POST') return result({ error: 'POST only' }, 405);
-    if (request.headers.get('x-ingest-secret') !== env.INGEST_SECRET) return result({ error: 'unauthorized' }, 401);
     // No query-string credentials and no cross-origin browser bootstrap.
     if (url.search || (request.headers.has('Origin') && request.headers.get('Origin') !== redirect.origin)) return result({ error: 'invalid_start_origin' }, 403);
     try {
+      // Existing ingest-key clients remain compatible. Setup codes authorize only this route.
+      if (request.headers.get('x-ingest-secret') !== env.INGEST_SECRET) {
+        const code = request.headers.get('x-gmail-setup-code') ?? '';
+        if (!/^[A-Za-z0-9_-]{43}$/.test(code)) return result({ error: 'unauthorized' }, 401);
+        const now = Date.now();
+        // Atomic consumption prevents concurrent starts and replay. A failed start needs a new code.
+        const grant = await env.DB!.prepare(`DELETE FROM gmail_oauth_setup_codes
+          WHERE code_hash=? AND issued_at<=? AND expires_at>?
+          AND expires_at-issued_at<=? RETURNING code_hash`)
+          .bind(await digest(code), now, now, TTL_MS).first();
+        if (!grant) return result({ error: 'unauthorized' }, 401);
+      }
       const state = random();
       const binding = random();
       const verifier = random();

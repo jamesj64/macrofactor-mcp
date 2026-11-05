@@ -73,7 +73,7 @@ is found, cleanup backs off rather than deleting unrelated mail. Later wakes ret
 
 ## Activation / rollback
 
-1. Apply `0003_email_commands.sql` and `0004_gmail_oauth.sql` only after deployment authorization.
+1. Apply `0003_email_commands.sql`, `0004_gmail_oauth.sql`, and `0005_gmail_setup_codes.sql` only after deployment authorization.
    Never run remote destructive initialization or copy claimed legacy entries into new commands.
 2. Configure the explicitly approved Gmail accounts/client and encryption secret through secure
    tooling. Complete OAuth in the same browser via the setup/start route and exact callback.
@@ -98,3 +98,21 @@ must use the authorized setup flow, not inferred authorization from a code test.
 Critical local tests exercise immutable retries, one-shot start, uncertain results, validation,
 receipt matching, stale day, independent cleanup, lost-send reconciliation and legacy-mode gates.
 Mocks/SQLite do not prove actual Mail timing, app persistence or production D1 concurrency.
+
+## One-use Gmail setup credential
+
+The browser setup form accepts a separate setup credential, never the long-lived ingest key.
+An authorized administrator generates 32 random bytes using Web Crypto in secure browser memory,
+encodes them as unpadded base64url (43 characters), and computes SHA-256 over that encoded string.
+Insert only the unpadded base64url hash into `gmail_oauth_setup_codes`, with `issued_at` set to current
+Unix milliseconds and `expires_at` set to `issued_at + 600000`. Never insert the plaintext credential,
+print it, put it in a URL, or save it to files, clipboard, logs, or browser storage. Fill the password
+field directly from browser memory and discard the value after submission.
+
+POST `/oauth/gmail/start` accepts this credential in `x-gmail-setup-code` and consumes its hash using
+one atomic DELETE RETURNING before creating OAuth state. Reuse, expiry, future issuance, malformed
+credentials and cross-origin browser requests fail closed. A failed start after consumption needs a
+new credential. The existing `x-ingest-secret` path remains compatible and other ingest routes are
+unchanged; setup credentials authorize only the OAuth start route. OAuth still requires PKCE,
+same-browser state binding and the configured Google sender check. Provisioning is administrative:
+there is no public credential issuance endpoint. This change does not activate food delivery or send mail.
