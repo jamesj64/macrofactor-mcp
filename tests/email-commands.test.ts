@@ -63,3 +63,12 @@ it('does not activate without config, auth or with nonempty old queue',async()=>
  env.FOOD_DELIVERY_MODE='email';expect((await handleCommand(new Request('https://test/commands/'+id),env)).status).toBe(401);
  sql.exec('INSERT INTO pending_food VALUES (1)');await expect(create('blocked')).rejects.toThrow('Legacy');
 });
+
+it('starts email cleanup lifetime after a delayed send finishes, not at scheduler tick start',async()=>{
+ await create();
+ const t={sendWake:vi.fn(async()=>{vi.mocked(Date.now).mockReturnValue(now+120000);return {messageId:'delayed'};}),findSentAttempt:vi.fn(async()=>[]),trashWake:vi.fn(async()=>{})};
+ await processCommandMail(env,now,t);
+ expect(sql.prepare('SELECT cleanup_at FROM command_mail_attempts').get()!.cleanup_at).toBe(now+180000);
+ await processCommandMail(env,now+179999,t);expect(t.trashWake).not.toHaveBeenCalled();
+ await processCommandMail(env,now+180000,t);expect(t.trashWake).toHaveBeenCalledWith(env,'delayed');
+});

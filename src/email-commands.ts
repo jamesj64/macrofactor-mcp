@@ -201,7 +201,12 @@ export async function processCommandMail(env: CommandEnv, now=Date.now(), transp
     if (!claimed.results.length) continue;
     try {
       const sent=await transport.sendWake(env,a.command_id,a.id);
-      await env.DB.prepare(`UPDATE command_mail_attempts SET state='sent',gmail_message_id=?,last_error=NULL WHERE id=?`).bind(sent.messageId,a.id).run();
-    } catch { await env.DB.prepare(`UPDATE command_mail_attempts SET state='send_unknown',last_error='send_outcome_unknown' WHERE id=?`).bind(a.id).run(); }
+      // Start the lifetime after the send response, not at the beginning of a potentially slow tick.
+      const cleanupAt=Math.max(now,Date.now())+cleanup;
+      await env.DB.prepare(`UPDATE command_mail_attempts SET state='sent',gmail_message_id=?,cleanup_at=?,last_error=NULL WHERE id=?`).bind(sent.messageId,cleanupAt,a.id).run();
+    } catch {
+      // If delivery happened but its response was lost, retain it at least this long after the attempt.
+      await env.DB.prepare(`UPDATE command_mail_attempts SET state='send_unknown',cleanup_at=?,last_error='send_outcome_unknown' WHERE id=?`).bind(Math.max(now,Date.now())+cleanup,a.id).run();
+    }
   }
 }
