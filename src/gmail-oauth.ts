@@ -95,12 +95,35 @@ function browserCookie(request: Request): string | undefined {
   return /^[A-Za-z0-9_-]{43}$/.test(value) ? value : undefined;
 }
 
+// Only fixed, allowlisted diagnostics may reach logs. Never log upstream bodies,
+// exception messages, URLs, request headers, or credential values.
+const GOOGLE_ERROR_CODES = new Set(['invalid_client', 'invalid_grant', 'invalid_request',
+  'unauthorized_client', 'unsupported_grant_type', 'access_denied', 'invalid_scope',
+  'SERVICE_DISABLED', 'ACCESS_TOKEN_SCOPE_INSUFFICIENT', 'API_KEY_SERVICE_BLOCKED']);
+class GmailOAuthRequestError extends Error {
+  constructor(readonly reason: 'network' | 'http' | 'invalid_json', readonly status?: number, readonly upstreamCode?: string) {
+    super('Gmail authorization request failed');
+  }
+}
 async function getJSON(fetcher: typeof fetch, url: string, init: RequestInit): Promise<Record<string, unknown>> {
+  let response: Response;
   try {
-    const response = await fetcher(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(20_000) });
-    if (!response.ok) throw new Error();
-    return await response.json() as Record<string, unknown>;
-  } catch { throw new Error('Gmail authorization request failed'); }
+    response = await fetcher(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(20_000) });
+  } catch { throw new GmailOAuthRequestError('network'); }
+  if (!response.ok) {
+    let upstreamCode: string | undefined;
+    try {
+      const body: any = await response.json();
+      const candidates = [body?.error, ...(Array.isArray(body?.error?.details) ? body.error.details.map((detail: any) => detail?.reason) : [])];
+      upstreamCode = candidates.find(value => typeof value === 'string' && GOOGLE_ERROR_CODES.has(value));
+    } catch { /* An unreadable upstream body must not prevent safe diagnostics. */ }
+    throw new GmailOAuthRequestError('http', response.status, upstreamCode);
+  }
+  try {
+    const body: unknown = await response.json();
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error();
+    return body as Record<string, unknown>;
+  } catch { throw new GmailOAuthRequestError('invalid_json'); }
 }
 
 export async function handleGmailOAuth(request: Request, env: GmailOAuthEnv, fetcher: typeof fetch = fetch): Promise<Response> {
@@ -191,6 +214,7 @@ form.addEventListener('submit', async event => {
     || url.searchParams.getAll('state').length !== 1 || url.searchParams.getAll('code').length > 1) {
     return result({ error: 'invalid_or_expired_oauth_state' }, 400);
   }
+  let stage = 'state_consume';
   try {
     const stateHash = await digest(state);
     // DELETE ... RETURNING consumes state atomically, before any token exchange.
@@ -199,25 +223,36 @@ form.addEventListener('submit', async event => {
     if (!pending) return result({ error: 'invalid_or_expired_oauth_state' }, 400, cookieValue('', 0));
     const code = url.searchParams.get('code');
     if (url.searchParams.has('error') || !code || code.length > 8192) return result({ error: 'gmail_authorization_not_completed' }, 400, cookieValue('', 0));
+    stage = 'pkce_decrypt';
     const verifier = await decrypt(env, pending.ciphertext, pending.iv, `pkce:${stateHash}`);
+    stage = 'token_exchange';
     const tokens = await getJSON(fetcher, 'https://oauth2.googleapis.com/token', {
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ client_id: env.GMAIL_CLIENT_ID!, client_secret: env.GMAIL_CLIENT_SECRET!,
         redirect_uri: redirect.href, grant_type: 'authorization_code', code, code_verifier: verifier }).toString(),
     });
+    stage = 'grant_validation';
     if (typeof tokens.access_token !== 'string' || !tokens.access_token || /[\r\n]/.test(tokens.access_token)
       || typeof tokens.refresh_token !== 'string' || !tokens.refresh_token || /[\r\n]/.test(tokens.refresh_token)
       || typeof tokens.scope !== 'string' || !tokens.scope.split(' ').includes(SCOPE)) throw new Error('Incomplete Gmail grant');
+    stage = 'profile_lookup';
     const profile = await getJSON(fetcher, 'https://gmail.googleapis.com/gmail/v1/users/me/profile', {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
     });
     if (typeof profile.emailAddress !== 'string' || profile.emailAddress.toLowerCase() !== env.GMAIL_SENDER!.toLowerCase()) {
       return result({ error: 'gmail_sender_account_mismatch' }, 403, cookieValue('', 0));
     }
+    stage = 'token_encrypt';
     const stored = await encrypt(env, tokens.refresh_token, 'refresh-token');
+    stage = 'token_persist';
     await env.DB!.prepare(`INSERT INTO gmail_oauth_tokens (id,sender,ciphertext,iv,updated_at) VALUES ('primary',?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET sender=excluded.sender,ciphertext=excluded.ciphertext,iv=excluded.iv,updated_at=excluded.updated_at`)
       .bind(profile.emailAddress.toLowerCase(), stored.ciphertext, stored.iv, Date.now()).run();
     return result({ ok: true, message: 'Gmail is connected. You can close this tab.' }, 200, cookieValue('', 0));
-  } catch { return result({ error: 'gmail_oauth_callback_failed_restart_authorization' }, 400, cookieValue('', 0)); }
+  } catch (error) {
+    console.warn(JSON.stringify({ event: 'gmail_oauth_callback_failed', stage,
+      ...(error instanceof GmailOAuthRequestError ? { reason: error.reason, status: error.status, upstream_code: error.upstreamCode } : {}),
+    }));
+    return result({ error: 'gmail_oauth_callback_failed_restart_authorization' }, 400, cookieValue('', 0));
+  }
 }

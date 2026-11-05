@@ -130,3 +130,45 @@ it('keeps legacy ingest authentication independent of the setup code table', asy
   sql.exec('DROP TABLE gmail_oauth_setup_codes');
   await start();
 });
+
+it.each([
+  ['invalid_client', 'invalid_client'],
+  ['secret-code-should-not-appear', undefined],
+])('reports only allowlisted token exchange diagnostics (%s)', async (error, expected) => {
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const { cookie, callback } = await start();
+  const fetcher = vi.fn(async () => Response.json({ error, error_description: 'secret-description', access_token: 'secret-access' }, { status: 400 }));
+  const response = await handleGmailOAuth(new Request(callback, { headers: { Cookie: cookie } }), env, fetcher as any);
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({ error: 'gmail_oauth_callback_failed_restart_authorization' });
+  expect(warning).toHaveBeenCalledTimes(1);
+  expect(JSON.parse(warning.mock.calls[0][0])).toEqual({ event: 'gmail_oauth_callback_failed', stage: 'token_exchange', reason: 'http', status: 400, ...(expected ? { upstream_code: expected } : {}) });
+  expect(JSON.stringify(warning.mock.calls)).not.toMatch(/secret-|test-code|test-client|test-only|sender@example/);
+  expect(sql.prepare('SELECT count(*) n FROM gmail_oauth_tokens').get()!.n).toBe(0);
+  expect((await handleGmailOAuth(new Request(callback, { headers: { Cookie: cookie } }), env, fetcher as any)).status).toBe(400);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});
+it('distinguishes disabled Gmail API without logging upstream content', async () => {
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const { cookie, callback } = await start();
+  const valid = google();
+  const fetcher = vi.fn(async (url: string, init: RequestInit) => url.includes('/token') ? valid(url, init) : Response.json({ error: { message: 'private project information', details: [{ reason: 'SERVICE_DISABLED', metadata: { consumer: 'private-consumer' } }] } }, { status: 403 }));
+  await handleGmailOAuth(new Request(callback, { headers: { Cookie: cookie } }), env, fetcher as any);
+  expect(JSON.parse(warning.mock.calls[0][0])).toEqual({ event: 'gmail_oauth_callback_failed', stage: 'profile_lookup', reason: 'http', status: 403, upstream_code: 'SERVICE_DISABLED' });
+  expect(JSON.stringify(warning.mock.calls)).not.toContain('private');
+});
+it.each(['network', 'invalid_json'])('safely identifies %s failures', async reason => {
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const { cookie, callback } = await start();
+  const fetcher = vi.fn(async () => { if (reason === 'network') throw new Error('secret exception'); return new Response('private malformed payload'); });
+  await handleGmailOAuth(new Request(callback, { headers: { Cookie: cookie } }), env, fetcher as any);
+  expect(JSON.parse(warning.mock.calls[0][0])).toEqual({ event: 'gmail_oauth_callback_failed', stage: 'token_exchange', reason });
+});
+it('identifies persistence failure without logging SQL or credential values', async () => {
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const { cookie, callback } = await start();
+  const originalPrepare = env.DB.prepare;
+  env.DB.prepare = (query: string) => { if (query.startsWith('INSERT INTO gmail_oauth_tokens')) throw new Error('private SQL failure'); return originalPrepare(query); };
+  await handleGmailOAuth(new Request(callback, { headers: { Cookie: cookie } }), env, google() as any);
+  expect(JSON.parse(warning.mock.calls[0][0])).toEqual({ event: 'gmail_oauth_callback_failed', stage: 'token_persist' });
+});
