@@ -22,8 +22,15 @@ No food, mail, credential or production database tests were performed during dev
 
 ## Phone HTTP contract
 
-All routes use `x-ingest-secret` in the header. No credentials in query strings or shared shortcuts.
+The private email-command Shortcut can use `x-phone-command-token` for the four operations below.
+Existing `x-ingest-secret` command clients remain supported. No credentials in query strings or
+shared shortcuts. Legacy `/today`, refresh, export and queue routes still require their existing
+ingest credential; the new phone credential does not authorize them.
 
+- GET `/commands/connectivity` -> `{ok:true,scope:"email_commands",email_delivery_enabled:boolean}`.
+  Authenticated, uncached and read-only: it does not access the DB, queues, Gmail or MacroFactor.
+  It works before email mode is enabled. It proves credential/Worker reachability only, not Gmail
+  delivery, database readiness, Shortcut execution or MacroFactor app persistence.
 - GET `/commands/{id}` -> `id,state,mode,food,food_json,expected_name,expires_at`.
   `food_json` is JSON text containing a **one-element array** for the inspected Log by JSON Shortcut.
   `food` is the single object. Modes: ready -> execute; started/uncertain -> verify; other -> stop.
@@ -32,7 +39,10 @@ All routes use `x-ingest-secret` in the header. No credentials in query strings 
   `{status:"confirmed",observed:{name,nutrients:{energy,protein,carbs,fat}},summary?:object}`.
   Exact marker name and matching observed macros are required. Mismatch holds the command.
   Alternatively `{status:"uncertain"}` records ambiguity. Duplicate confirmation is safe.
+  The existing optional summary can update daily totals and snapshots after confirmation. The phone
+  credential is endpoint-scoped, not restricted to command-state-only writes.
 - POST `/today` separately can upload a fresh MacroFactor summary; it cannot undo the receipt.
+  This separate endpoint still requires the existing ingest credential.
 
 A receipt is a phone assertion based on a fresh lookup, not a native MacroFactor transaction ID.
 Recent Food is not a complete per-consumption ledger; nonmatch on an uncertain command never
@@ -98,6 +108,50 @@ must use the authorized setup flow, not inferred authorization from a code test.
 Critical local tests exercise immutable retries, one-shot start, uncertain results, validation,
 receipt matching, stale day, independent cleanup, lost-send reconciliation and legacy-mode gates.
 Mocks/SQLite do not prove actual Mail timing, app persistence or production D1 concurrency.
+
+## Scoped email-command phone credential
+
+Provisioning is a separate authorized production operation, not part of deploying this code. There
+is no credential-generation, enrollment or public issuance endpoint. Without
+`PHONE_COMMAND_TOKEN_SHA256`, the new phone credential path is disabled and legacy clients keep
+working. No schema migration, new Cloudflare service, OAuth grant or legacy-secret rotation is needed.
+
+When separately authorized, generate a distinct 32-byte cryptographically random credential in a
+secure setup flow and encode it as unpadded base64url (43 characters). Never reuse `INGEST_SECRET`,
+MCP, Gmail or setup credentials. Hash the exact encoded credential as UTF-8 with SHA-256, with no
+trailing newline, and configure only its 64-character lowercase hexadecimal digest as the Worker
+secret `PHONE_COMMAND_TOKEN_SHA256`. Keep the plaintext only in the private phone Shortcut's
+`x-phone-command-token` header. Do not put it in repository files, Wrangler vars, shared Shortcuts,
+email, URLs, logs, telemetry or build output. Do not enable request-header logging.
+
+The fixed HTTPS Worker origin must be used directly. The new header authorizes only:
+
+- GET `/commands/connectivity`.
+- GET `/commands/{uuid}`.
+- POST `/commands/{uuid}/start`.
+- POST `/commands/{uuid}/receipt` (including the existing optional summary behavior).
+
+It cannot create/list/cancel commands, send mail, authorize Gmail OAuth, access the MCP API or
+authorize `/ingest`, `/today`, `/foods-seen`, legacy queues or exports. It still requires email
+delivery mode for the three command operations, and it does not bypass one-shot start or receipt
+validation. Connectivity remains usable with email delivery disabled, without any food or mail test.
+Malformed/missing configuration, unsupported methods and unlisted routes fail closed. The server
+never returns the credential or digest and has no plaintext-credential storage. The credential is
+long-lived until revoked or rotated, and possession allows reading command food data and exercising
+the listed operations for known command IDs. Treat it as a bearer secret even though it is scoped.
+
+Production rollout, only after the corresponding approvals:
+
+1. Deploy the code while preserving all existing production variables, secrets, bindings and public
+   pages. Do not copy the repository's disabled bootstrap flags over a configured live environment.
+2. Provision the digest and configure the private Shortcut through the authorized secure flow.
+3. Call only GET `/commands/connectivity` to verify reachability and credential matching. A successful
+   response is not a live food, Gmail, DB or end-to-end phone test.
+
+To revoke, remove `PHONE_COMMAND_TOKEN_SHA256`. To rotate, replace it with the new digest and update
+the private Shortcut together; the previous credential stops working immediately and no grace
+period is retained. Legacy `INGEST_SECRET` clients are unaffected. Removing this code also disables
+the new credential; do not broaden legacy authorization as a rollback shortcut.
 
 ## One-use Gmail setup credential
 

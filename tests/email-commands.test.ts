@@ -1,6 +1,7 @@
 import {beforeEach,afterEach,expect,it,vi} from 'vitest';
 import {DatabaseSync} from 'node:sqlite';
 import {readFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
 import {createCommands,handleCommand,processCommandMail,cancelCommands} from '../src/email-commands';
 let sql:DatabaseSync; let env:any;
 const now=Date.parse('2026-11-05T18:00:00Z');
@@ -34,6 +35,44 @@ it('concurrent starts grant once; unknown result never reexecutes; exact repeate
  expect((await api(id,'/receipt',receipt)).status).toBe(200);expect((await api(id,'/receipt',receipt)).status).toBe(200);
  expect((await (await api(id)).json() as any).mode).toBe('stop');
  expect(JSON.parse(before.food_json)).toHaveLength(1);
+});
+it('scoped phone authorization supports fetch/start/receipt without changing one-shot execution',async()=>{
+ const token='A'.repeat(43); // Nonrandom test fixture, never a provisioned credential.
+ env.PHONE_COMMAND_TOKEN_SHA256=createHash('sha256').update(token).digest('hex');
+ const id=await create();
+ const phone=(path='',body?:any)=>handleCommand(new Request(`https://test/commands/${id}${path}`,{
+  method:path?'POST':'GET',headers:{'x-phone-command-token':token},...(body?{body:JSON.stringify(body)}:{})}),env);
+ const before=await (await phone()).json() as any;
+ expect(before.id).toBe(id);expect(before.mode).toBe('execute');
+ const starts=await Promise.all([phone('/start'),phone('/start')]);
+ const values=await Promise.all(starts.map(r=>r.json())) as any[];
+ expect(values.filter(x=>x.execute)).toHaveLength(1);
+ expect((await phone('/receipt',{status:'uncertain'})).status).toBe(200);
+ expect((await (await phone()).json() as any).mode).toBe('verify');
+ expect((await (await phone('/start')).json() as any).execute).toBe(false);
+ const receipt={status:'confirmed',observed:{name:before.expected_name,nutrients:food.nutrients}};
+ expect((await phone('/receipt',receipt)).status).toBe(200);
+ expect((await phone('/receipt',receipt)).status).toBe(200);
+ expect((await (await phone()).json() as any).mode).toBe('stop');
+ expect(sql.prepare('SELECT count(*) n FROM food_commands').get()!.n).toBe(1);
+ expect(sql.prepare('SELECT count(*) n FROM command_mail_attempts').get()!.n).toBe(0);
+});
+it('phone receipt preserves the existing optional summary behavior without reopening execution',async()=>{
+ sql.close();sql=new DatabaseSync(':memory:');
+ sql.exec(readFileSync(new URL('../schema.sql',import.meta.url),'utf8'));
+ sql.exec(readFileSync(new URL('../migrations/0003_email_commands.sql',import.meta.url),'utf8'));
+ const token='A'.repeat(43);
+ env.PHONE_COMMAND_TOKEN_SHA256=createHash('sha256').update(token).digest('hex');
+ const id=await create();const before=await (await api(id)).json() as any;
+ await api(id,'/start');
+ const response=await handleCommand(new Request(`https://test/commands/${id}/receipt`,{
+  method:'POST',headers:{'x-phone-command-token':token},body:JSON.stringify({status:'confirmed',
+   observed:{name:before.expected_name,nutrients:food.nutrients},summary:{consumed:food.nutrients}})}),env);
+ expect(await response.json()).toEqual({ok:true,status:'confirmed',summary_saved:true});
+ expect(sql.prepare('SELECT calories,source FROM today_summary').get()).toMatchObject({calories:500,source:'email-command'});
+ expect(sql.prepare('SELECT calories,source FROM days').get()).toMatchObject({calories:500,source:'live'});
+ expect((await (await api(id,'/start')).json() as any).execute).toBe(false);
+ expect(sql.prepare('SELECT count(*) n FROM command_mail_attempts').get()!.n).toBe(0);
 });
 it('15k kcal or observed mismatch is held, and stale day cannot start',async()=>{
  const big=await createCommands(env,[{...food,nutrients:{...food.nutrients,energy:15000}}],'big',now);expect(big.commands[0].state).toBe('held');

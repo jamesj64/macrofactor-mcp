@@ -2,8 +2,9 @@ import type { MacroFactorFood } from './mf-schema';
 import { validateFoodPayload } from './nutrients';
 import * as db from './db';
 import { gmailConfigured, sendWake, findSentAttempt, trashWake, type GmailEnv } from './gmail-transport';
+import { authorizePhoneCommandRequest, COMMAND_CONNECTIVITY_PATH, type PhoneCommandAuthEnv } from './phone-command-auth';
 
-export interface CommandEnv extends GmailEnv {
+export interface CommandEnv extends GmailEnv, PhoneCommandAuthEnv {
   DB: D1Database; INGEST_SECRET: string; USER_TZ?: string;
   FOOD_DELIVERY_MODE?: string; GMAIL_RETRY_MINUTES?: string;
   GMAIL_TRASH_AFTER_SECONDS?: string; FOOD_REVIEW_KCAL?: string;
@@ -109,20 +110,27 @@ export async function cancelCommands(env: CommandEnv, id?: string) {
   return r.results.length;
 }
 export async function handleCommand(request: Request, env: CommandEnv): Promise<Response> {
+  const path = new URL(request.url).pathname;
+  if (path === COMMAND_CONNECTIVITY_PATH) {
+    if (request.method !== 'GET') return json({error:'GET only'},405);
+    if (!await authorizePhoneCommandRequest(request,env)) return json({error:'unauthorized'},401);
+    // Safe before email delivery is activated. No DB, queues, Gmail, or app actions are touched.
+    return json({ok:true,scope:'email_commands',email_delivery_enabled:emailMode(env)});
+  }
   if (!emailMode(env)) return json({error:'not_found'},404);
-  if (!env.INGEST_SECRET || request.headers.get('x-ingest-secret')!==env.INGEST_SECRET) return json({error:'unauthorized'},401);
-  const m = /^\/commands\/([0-9a-f-]{36})(?:\/(start|receipt))?$/.exec(new URL(request.url).pathname);
+  const m = /^\/commands\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/(start|receipt))?$/.exec(path);
   if (!m) return json({error:'not_found'},404);
+  const method = m[2] ? 'POST' : 'GET';
+  if (request.method !== method) return json({error:`${method} only`},405);
+  if (!await authorizePhoneCommandRequest(request,env)) return json({error:'unauthorized'},401);
   const now = Date.now(); await expire(env,now);
   let c = await env.DB.prepare('SELECT * FROM food_commands WHERE id=?').bind(m[1]).first<Command>();
   if (!c) return json({error:'not_found'},404);
   if (!m[2]) {
-    if (request.method!=='GET') return json({error:'GET only'},405);
     const food = JSON.parse(c.payload);
     const mode = c.state==='ready'?'execute':['started','uncertain'].includes(c.state)?'verify':'stop';
     return json({id:c.id,state:c.state,mode,food,food_json:JSON.stringify([food]),expected_name:food.name,expires_at:c.expires_at});
   }
-  if (request.method!=='POST') return json({error:'POST only'},405);
   if (m[2]==='start') {
     const changed=await env.DB.prepare(`UPDATE food_commands SET state='started',started_at=?
       WHERE id=? AND state='ready' AND day=? AND expires_at>? RETURNING id`).bind(now,c.id,localDay(env,now),now).all();

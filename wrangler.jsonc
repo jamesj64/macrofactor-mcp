@@ -45,6 +45,7 @@
 
   // Secrets (set via `npx wrangler secret put NAME`, do NOT put them here):
   //   INGEST_SECRET          - shared secret for the phone/PC endpoints (/pending-all, /sync-ack, /today, /upload-export, ...)
+  //   PHONE_COMMAND_TOKEN_SHA256 - optional lowercase hex SHA-256 digest for the email-command Shortcut only
   //   MCP_TOKEN              - (recommended) makes the MCP URL capability-style /mcp/<token>
   //   PUSHCUT_WEBHOOK_URL         - (optional) Pushcut webhook "MacroFactor" → runs the "MF Sync" Shortcut (writes)
   //   PUSHCUT_REFRESH_WEBHOOK_URL - (optional) Pushcut webhook "MacroFactor Refresh" → runs "MF Nightly" (reads)
