@@ -108,7 +108,8 @@ class GmailOAuthRequestError extends Error {
 async function getJSON(fetcher: typeof fetch, url: string, init: RequestInit): Promise<Record<string, unknown>> {
   let response: Response;
   try {
-    response = await fetcher(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(20_000) });
+    // Workers rejects redirect:'error' before sending; manual + !ok also rejects all redirects.
+    response = await fetcher(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(20_000) });
   } catch { throw new GmailOAuthRequestError('network'); }
   if (!response.ok) {
     let upstreamCode: string | undefined;

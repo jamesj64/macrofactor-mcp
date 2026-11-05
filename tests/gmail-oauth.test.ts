@@ -30,6 +30,7 @@ beforeEach(() => {
 });
 afterEach(() => { sql.close(); vi.restoreAllMocks(); });
 const google = (sender = 'sender@example.com') => vi.fn(async (url: string, init: RequestInit) => {
+  expect(init.redirect).toBe('manual');
   if (url === 'https://oauth2.googleapis.com/token') {
     const body = new URLSearchParams(init.body as string);
     expect(body.get('code_verifier')).toMatch(/^[A-Za-z0-9_-]{43}$/);
@@ -171,4 +172,17 @@ it('identifies persistence failure without logging SQL or credential values', as
   env.DB.prepare = (query: string) => { if (query.startsWith('INSERT INTO gmail_oauth_tokens')) throw new Error('private SQL failure'); return originalPrepare(query); };
   await handleGmailOAuth(new Request(callback, { headers: { Cookie: cookie } }), env, google() as any);
   expect(JSON.parse(warning.mock.calls[0][0])).toEqual({ event: 'gmail_oauth_callback_failed', stage: 'token_persist' });
+});
+
+it.each([301, 302, 303, 307, 308])('rejects token redirects without following or saving tokens (%s)', async status => {
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const { cookie, callback } = await start();
+  const fetcher = vi.fn(async (_url: string, init: RequestInit) => {
+    expect(init.redirect).toBe('manual');
+    return new Response(null, { status, headers: { Location: 'https://untrusted.example/' } });
+  });
+  const response = await handleGmailOAuth(new Request(callback, { headers: { Cookie: cookie } }), env, fetcher as any);
+  expect(response.status).toBe(400);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  expect(sql.prepare('SELECT count(*) n FROM gmail_oauth_tokens').get()!.n).toBe(0);
 });

@@ -50,7 +50,8 @@ function messageId(attemptId: string): string {
 async function request(fetcher: Fetcher, url: string, init: RequestInit): Promise<Response> {
   let response: Response;
   try {
-    response = await fetcher(url, { ...init, signal: AbortSignal.timeout(20_000), redirect: 'error' });
+    // Never forward credentials on redirects; Workers does not support redirect:'error'.
+    response = await fetcher(url, { ...init, signal: AbortSignal.timeout(20_000), redirect: 'manual' });
   } catch {
     // Do not propagate upstream errors, URLs, tokens, or response bodies into logs.
     throw new Error('Gmail transport request failed; outcome may be uncertain');
