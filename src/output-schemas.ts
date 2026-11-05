@@ -63,7 +63,7 @@ const wrapped = <T extends z.ZodRawShape>(shape: T, what: string) => ({
   ...common,
 });
 
-const logResult = { ...common, queue_id: int, queue_ids: z.array(z.number()).optional(), logged_as: anyObj, items: anyList, components: anyList, candidates: anyList, matches: anyList };
+const logResult = { ...common, request_id: str, command_ids: z.array(z.string()).optional(), commands: anyList, queue_id: int, queue_ids: z.array(z.number()).optional(), logged_as: anyObj, items: anyList, components: anyList, candidates: anyList, matches: anyList };
 
 // Each schema is a LOOSE object (additionalProperties: true in the emitted JSON schema) so neither the
 // server nor a validating client rejects a response that carries an extra field.
@@ -137,6 +137,7 @@ export const OUT: Record<string, z.ZodObject<any>> = {
   log_water: L({ ...common }),
   log_weight: L({ ...common }),
   refresh_from_phone: L({ ...common }),
-  get_pending_logs: L({ food: anyList, water: anyList, weight: anyList, batches: anyList, total_pending: int, recent_dispatches: anyList, ...common }),
+  get_pending_logs: L({ commands: anyList, food: anyList, water: anyList, weight: anyList, batches: anyList, total_pending: int, recent_dispatches: anyList, ...common }),
   cancel_pending_log: L({ cancelled: anyObj, ...common }),
 };
+

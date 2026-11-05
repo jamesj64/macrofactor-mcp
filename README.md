@@ -1,5 +1,7 @@
 # MacroFactor MCP
 
+**New, opt-in:** [Per-entry email command bridge](docs/email-command-bridge.md) replaces claim-all delivery with immutable entry IDs, single-use execution, verified macro receipts, Gmail wake retries and timed Trash. Default configuration remains the legacy flow below until coordinated activation.
+
 A personal [Model Context Protocol](https://modelcontextprotocol.io) server that lets an AI agent
 (Claude, ChatGPT, Codex, Cursor, …) **search food macros, read your MacroFactor data, and log food,
 water and weight back into MacroFactor** — including requests like *"add a Jersey Mike's giant turkey
@@ -215,3 +217,4 @@ targets, foods and all logging.
 ## License
 
 MIT — see [LICENSE](./LICENSE). Upstream © chaotix345; fork changes © jamesj64.
+

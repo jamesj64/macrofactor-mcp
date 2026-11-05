@@ -15,10 +15,12 @@ import {
 import { OUT } from "./output-schemas";
 import { handleIngest } from "./ingest";
 import { ImportDO } from "./importer";
+import { handleGmailOAuth } from "./gmail-oauth";
+import { emailMode, createCommands, handleCommand, processCommandMail, commandStatus, cancelCommands, type CommandEnv } from "./email-commands";
 
 export { ImportDO };
 
-export interface Env {
+export interface Env extends CommandEnv {
   DB: D1Database;
   MCP_OBJECT: DurableObjectNamespace;
   IMPORT_DO: DurableObjectNamespace;
@@ -62,8 +64,9 @@ const dateRange = {
   end_date: z.string().optional().describe("YYYY-MM-DD"),
 };
 
-type PushStatus = "queued_only" | "sent" | "push_failed";
-interface PushResult { status: PushStatus; detail?: string }
+type PushStatus = "queued_only" | "sent" | "push_failed" | "email_pending" | "needs_review";
+interface PushResult { status: PushStatus; detail?: string; bridge?: Awaited<ReturnType<typeof createCommands>> }
+const commandOutput = (r: PushResult) => r.bridge ? { request_id:r.bridge.request_id, command_ids:r.bridge.commands.map(c=>c.id), commands:r.bridge.commands } : {};
 
 // Ping the phone: one pre-configured Pushcut notification whose action runs the "MF Sync"
 // Shortcut. The push carries NO dynamic fields (that needs Pushcut Pro) — everything is already
@@ -91,8 +94,13 @@ async function queueFoods(
   env: Env,
   payloads: MacroFactorFood[],
   intendedTimes: (string | undefined)[] = [],
+  requestId?: string,
 ): Promise<PushResult & { ids: number[] }> {
   const now = Date.now();
+  if (emailMode(env)) {
+    const bridge=await createCommands(env,payloads,requestId,now);
+    return {status:bridge.commands.some(c=>c.state==='held')?'needs_review':'email_pending',ids:[],bridge};
+  }
   const ids = await db.enqueueFoods(env.DB, payloads.map((p) => JSON.stringify(p)), now);
   for (let i = 0; i < payloads.length; i++) {
     const t = intendedTimes[i];
@@ -104,6 +112,8 @@ async function queueFoods(
 
 // Human-facing result message for queued item(s), given the push status.
 function foodMsg(label: string, r: PushResult): string {
+  if (r.status==='needs_review') return `Held ${label} for macro/serving validation. Inspect commands; nothing held will log automatically.`;
+  if (r.status==='email_pending') return `Prepared ${label}. An email wakes the phone; the same entry ID is reused for retries. Logging is confirmed only after the phone verifies the ID and macros.`;
   if (r.status === "queued_only") {
     return (
       `Queued ${label}. The phone push isn't configured yet — set the PUSHCUT_WEBHOOK_URL secret and build the ` +
@@ -229,6 +239,8 @@ export class MyMCP extends McpAgent<Env> {
   server = new McpServer({ name: "MacroFactor", version: "0.2.0" }, { instructions: MCP_INSTRUCTIONS });
 
   async init() {
+    if (emailMode(this.env)) this.server = new McpServer({name:"MacroFactor",version:"0.3.0"},{instructions:
+      "MacroFactor uses per-entry email commands. For every intended food/meal generate a request_id and reuse it for tool/network retries; new intentional consumption needs a new ID. Food writes prepare immutable commands, not completed logs. Read commands from get_pending_logs: held needs corrected macros/servings, started/uncertain means verify only and must NEVER be re-logged with a new request ID. Confirmed means the phone reported exact ID-name and matching macros. cancel_pending_log can cancel command_id but cannot delete an already logged food. Food names carry unique [MF:ID] markers. Use get_today for current totals, official food sources for accurate portions, and MF Refresh for readback. No backdating. Water/weight tools are disabled in email mode. Export uploads still supply historical analytics."});
     db.setUserTz(this.env.USER_TZ);
     const DB = () => this.env.DB;
     const usdaKey = () => this.env.USDA_API_KEY;
@@ -1061,6 +1073,7 @@ export class MyMCP extends McpAgent<Env> {
             .optional()
             .describe("Optional component breakdown, each with its own nutrients; MacroFactor shows them when the entry is expanded"),
           intended_time: intendedTimeField,
+          request_id: z.string().optional().describe("Stable caller retry key for email delivery; reuse only for the same intended entry/payload."),
         },
         outputSchema: OUT.log_food,
         annotations: WRITE_HINT,
@@ -1072,12 +1085,13 @@ export class MyMCP extends McpAgent<Env> {
         } catch (e) {
           return invalid(e);
         }
-        const r = await queueFoods(this.env, [payload], [args.intended_time]);
+        const r = await queueFoods(this.env, [payload], [args.intended_time], args.request_id);
         return text({
           status: r.status,
           message: foodMsg(`"${payload.name}"`, r),
           logged_as: { name: payload.name, brand: payload.brand, icon: payload.icon, serving: payload.serving, macros: macroSummary(payload.nutrients) },
           queue_id: r.ids[0],
+          ...commandOutput(r),
         });
       },
     );
@@ -1107,11 +1121,12 @@ export class MyMCP extends McpAgent<Env> {
             .describe("Restrict to one source (favorite/custom/history from the export, recent = foods seen by the nightly feed) to break a name tie."),
           llm_prompt: foodItemShape.llm_prompt,
           intended_time: intendedTimeField,
+          request_id: z.string().optional().describe("Stable caller retry key for email delivery; reuse only for the same intended entry/payload."),
         },
         outputSchema: OUT.log_saved_food,
         annotations: WRITE_HINT,
       },
-      async ({ food, servings, exact, source, llm_prompt, intended_time }) => {
+      async ({ food, servings, exact, source, llm_prompt, intended_time, request_id }) => {
         const n = servings != null && Number.isFinite(servings) && servings > 0 ? servings : 1;
         const { loggable, nameOnly } = await db.lookupSavedFood(DB(), food, !!exact, source);
 
@@ -1167,7 +1182,7 @@ export class MyMCP extends McpAgent<Env> {
         } catch (e) {
           return invalid(e);
         }
-        const r = await queueFoods(this.env, [payload], [intended_time]);
+        const r = await queueFoods(this.env, [payload], [intended_time], request_id);
 
         const baseServing = `${f.serving_qty ?? 1} ${f.serving_size ?? "serving"}`.trim();
         const effServing = f.serving_qty != null ? `${qty} ${f.serving_size ?? "serving"}`.trim() : `${n}× saved serving`;
@@ -1175,6 +1190,7 @@ export class MyMCP extends McpAgent<Env> {
           status: r.status,
           message: `${foodMsg(`"${scaled.name}"`, r)} (${n}× "${f.name}" [saved as ${baseServing}] → ${effServing}: ${macroSummary(payload.nutrients)})`,
           queue_id: r.ids[0],
+          ...commandOutput(r),
         });
       },
     );
@@ -1201,11 +1217,12 @@ export class MyMCP extends McpAgent<Env> {
           notes: foodItemShape.notes,
           llm_prompt: foodItemShape.llm_prompt,
           intended_time: intendedTimeField,
+          request_id: z.string().optional().describe("Stable caller retry key for email delivery; reuse only for the same intended entry/payload."),
         },
         outputSchema: OUT.log_recipe,
         annotations: WRITE_HINT,
       },
-      async ({ name, ingredients, icon, brand, serving, notes, llm_prompt, intended_time }) => {
+      async ({ name, ingredients, icon, brand, serving, notes, llm_prompt, intended_time, request_id }) => {
         let payload: MacroFactorFood;
         try {
           payload = validateFoodPayload(
@@ -1214,12 +1231,13 @@ export class MyMCP extends McpAgent<Env> {
         } catch (e) {
           return invalid(e);
         }
-        const r = await queueFoods(this.env, [payload], [intended_time]);
+        const r = await queueFoods(this.env, [payload], [intended_time], request_id);
         return text({
           status: r.status,
           message: `${foodMsg(`"${name}"`, r)} (${ingredients.length} ingredients → ${macroSummary(payload.nutrients)})`,
           components: payload.recipe?.map((c) => ({ name: c.name, macros: macroSummary(c.nutrients) })),
           queue_id: r.ids[0],
+          ...commandOutput(r),
         });
       },
     );
@@ -1246,11 +1264,12 @@ export class MyMCP extends McpAgent<Env> {
             .string().optional()
             .describe("Override the entry name, e.g. 'Lunch'. Auto-inferred from start_hour if omitted."),
           intended_time: intendedTimeField,
+          request_id: z.string().optional().describe("Stable caller retry key for email delivery; reuse only for the same intended entry/payload."),
         },
         outputSchema: OUT.relog_meal,
         annotations: WRITE_HINT,
       },
-      async ({ date, start_hour, end_hour, meal_name, intended_time }) => {
+      async ({ date, start_hour, end_hour, meal_name, intended_time, request_id }) => {
         const isoDate = validIsoDate(date);
         if (!isoDate) return text("date must be YYYY-MM-DD.");
         if (start_hour != null && end_hour != null && start_hour >= end_hour) {
@@ -1283,7 +1302,7 @@ export class MyMCP extends McpAgent<Env> {
           ),
         );
 
-        const r = await queueFoods(this.env, [payload], [intended_time]);
+        const r = await queueFoods(this.env, [payload], [intended_time], request_id);
         return text({
           status: r.status,
           message: foodMsg(`"${label}"`, r),
@@ -1292,6 +1311,7 @@ export class MyMCP extends McpAgent<Env> {
           totals: { calories: Math.round(agg.calories), protein: r1(agg.protein), carbs: r1(agg.carbs), fat: r1(agg.fat) },
           items: agg.names,
           queue_id: r.ids[0],
+          ...commandOutput(r),
         });
       },
     );
@@ -1305,6 +1325,7 @@ export class MyMCP extends McpAgent<Env> {
           "or any multi-item log. Each item takes the same fields as log_food (flat macros or a nutrients dictionary, " +
           "serving, icon, brand, notes, llm_prompt). Logs at the current time — cannot backdate.",
         inputSchema: {
+          request_id: z.string().optional().describe("Stable retry key for this whole meal; reuse only with identical items."),
           items: z
             .array(z.object({ ...foodItemShape, intended_time: intendedTimeField }))
             .min(1)
@@ -1314,25 +1335,26 @@ export class MyMCP extends McpAgent<Env> {
         outputSchema: OUT.log_foods_batch,
         annotations: WRITE_HINT,
       },
-      async ({ items }) => {
+      async ({ items, request_id }) => {
         const payloads: MacroFactorFood[] = [];
         try {
           for (const item of items) payloads.push(validateFoodPayload(buildFoodPayload(item as unknown as LogFoodArgs, buildOpts())));
         } catch (e) {
           return invalid(e);
         }
-        const r = await queueFoods(this.env, payloads, items.map((i) => i.intended_time));
+        const r = await queueFoods(this.env, payloads, items.map((i) => i.intended_time), request_id);
         return text({
           status: r.status,
           count: payloads.length,
           message: foodMsg(`${payloads.length} foods`, r),
           items: payloads.map((p) => ({ name: p.name, icon: p.icon, macros: macroSummary(p.nutrients) })),
           queue_ids: r.ids,
+          ...commandOutput(r),
         });
       },
     );
 
-    if (String(this.env.ENABLE_WATER_WEIGHT).toLowerCase() === "true") {
+    if (!emailMode(this.env) && String(this.env.ENABLE_WATER_WEIGHT).toLowerCase() === "true") {
     this.server.registerTool(
       "log_water",
       {
@@ -1407,6 +1429,7 @@ export class MyMCP extends McpAgent<Env> {
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
       },
       async () => {
+        if (emailMode(this.env)) return text({status:"manual_refresh",message:"Run MF Refresh on the phone. Confirmed food commands already upload current totals; scheduled/app-close refresh remains available. Pushcut is not used in email mode."});
         const r = await notifyPhone(this.env, "refresh");
         if (r.status === "queued_only") {
           return text({ status: "not_configured", message: "No refresh push is configured (PUSHCUT_REFRESH_WEBHOOK_URL). Ask the user to run the 'MF Nightly' Shortcut (or 'Hey Siri, MF Nightly') to refresh." });
@@ -1433,7 +1456,7 @@ export class MyMCP extends McpAgent<Env> {
         outputSchema: OUT.get_pending_logs,
         annotations: READ_ONLY,
       },
-      async () => text(await db.getPendingLogs(DB())),
+      async () => text({ ...await db.getPendingLogs(DB()), ...(emailMode(this.env)?{commands:await commandStatus(this.env)}:{}) }),
     );
 
     this.server.registerTool(
@@ -1447,6 +1470,7 @@ export class MyMCP extends McpAgent<Env> {
           "(a sync already running on the phone may still land). The optional queue param targets a specific " +
           "queue; omit it (or pass 'all') to clear everything. Returns counts of what was deleted.",
         inputSchema: {
+          command_id: z.string().optional().describe("Email delivery: cancel one command ID; omitted cancels pending commands."),
           queue: z
             .enum(["food", "water", "weight", "batch", "all"])
             .optional()
@@ -1455,15 +1479,23 @@ export class MyMCP extends McpAgent<Env> {
         outputSchema: OUT.cancel_pending_log,
         annotations: WRITE_HINT,
       },
-      async ({ queue = "all" }) => {
+      async ({ queue = "all", command_id }) => {
+        if (command_id && (!emailMode(this.env) || !["food","all"].includes(queue))) return text({status:"invalid",message:"command_id cancellation requires email mode and food/all scope."});
+        let commandsCancelled = 0;
+        if (emailMode(this.env) && (queue === "food" || queue === "all")) {
+          const count = await cancelCommands(this.env,command_id);
+          commandsCancelled = count;
+          if (command_id) return text({cancelled:{commands:count},message:"Cancelled future delivery for this entry. An app action already running can still land; this does not delete MacroFactor food."});
+        }
         const queues: ("food" | "water" | "weight" | "batch")[] =
           queue === "all" ? ["food", "water", "weight", "batch"] : [queue as "food" | "water" | "weight" | "batch"];
         const counts = await db.cancelPending(this.env.DB, queues);
-        const total = counts.food + counts.water + counts.weight + counts.batch;
+        const total = counts.food + counts.water + counts.weight + counts.batch + commandsCancelled;
         if (total === 0) {
           return text({ cancelled: counts, message: "No pending logs found — the queue was already empty." });
         }
         const parts: string[] = [];
+        if (commandsCancelled) parts.push(`${commandsCancelled} email commands`);
         if (counts.food > 0) parts.push(`${counts.food} food`);
         if (counts.water > 0) parts.push(`${counts.water} water`);
         if (counts.weight > 0) parts.push(`${counts.weight} weight`);
@@ -1472,7 +1504,7 @@ export class MyMCP extends McpAgent<Env> {
           cancelled: counts,
           message:
             `Cancelled ${parts.join(", ")} pending log${total > 1 ? "s" : ""}. ` +
-            `Nothing will be logged on the next MF Sync.`,
+            `Future delivery is cancelled; an app action already running can still land. This does not delete food already in MacroFactor.`,
         });
       },
     );
@@ -1872,7 +1904,8 @@ export default {
   // Daily fallback PR check (cron in wrangler.jsonc). The primary trigger is the /upload-export
   // hook above; this catches days the user does not upload.
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
-    await checkAndFirePrAlerts(env);
+    if (_event.cron === "0 8 * * *") await checkAndFirePrAlerts(env);
+    if (emailMode(env)) await processCommandMail(env);
   },
 };
 
@@ -1880,6 +1913,10 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   db.setUserTz(env.USER_TZ);
   const url = new URL(request.url);
 
+  if (url.pathname.startsWith("/oauth/gmail/")) return handleGmailOAuth(request,env);
+  if (url.pathname.startsWith("/commands/")) return handleCommand(request,env);
+  if (emailMode(env) && ["/pending","/pending-all","/pending-batch","/pending-water","/pending-weight"].includes(url.pathname))
+    return json({error:"legacy_sync_disabled",message:"Email delivery fetches one immutable /commands/{id}; legacy queue consumption is disabled."},409);
   if (url.pathname === "/ingest") return handleIngest(request, env);
   if (url.pathname === "/upload-export") {
     if (request.method !== "POST") return new Response("POST only", { status: 405 });
@@ -1952,3 +1989,4 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     { status: 404 },
   );
 }
+
